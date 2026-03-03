@@ -65,6 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(std::io::stderr)
         .init();
 
+    tracing::info!("starting MCP server transport=Stdio");
     let config = ServerConfig::load_from_env()?;
     let service = server::MailImapServer::new(config).serve(stdio()).await?;
     service.waiting().await?;
