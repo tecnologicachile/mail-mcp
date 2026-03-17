@@ -16,9 +16,11 @@ base64 = "0.22.1"
 chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
 dotenvy = "0.15.7"
 futures = "0.3.31"
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder", "hostname"] }
 mailparse = "0.16.1"
 pdf-extract = "0.10.0"
 regex = "1.12.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rmcp = { version = "0.16.0", features = ["server", "transport-io", "macros"] }
 rustls = "0.23.32"
 rustls-pki-types = "1.12.0"

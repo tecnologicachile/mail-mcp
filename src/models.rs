@@ -530,6 +530,93 @@ pub struct AppendMessageInput {
     pub raw_message: String,
 }
 
+// ─── SMTP input models ───────────────────────────────────────────────────────
+
+/// Input: send a new email via SMTP
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SmtpSendMessageInput {
+    /// Account identifier (defaults to `"default"`)
+    #[serde(default = "default_account_id")]
+    pub account_id: String,
+    /// Recipient email addresses (1..50)
+    pub to: Vec<String>,
+    /// CC recipients (optional, max 50)
+    #[serde(default)]
+    pub cc: Vec<String>,
+    /// BCC recipients (optional, max 50)
+    #[serde(default)]
+    pub bcc: Vec<String>,
+    /// Email subject (1..998 characters)
+    pub subject: String,
+    /// Plain text body (at least one of body_text or body_html required)
+    pub body_text: Option<String>,
+    /// HTML body (at least one of body_text or body_html required)
+    pub body_html: Option<String>,
+    /// Reply-To address (optional)
+    pub reply_to: Option<String>,
+    /// In-Reply-To message ID for threading (optional)
+    pub in_reply_to: Option<String>,
+    /// References header for threading (optional)
+    pub references: Option<String>,
+}
+
+/// Input: reply to an existing message via SMTP
+///
+/// Fetches the original message via IMAP to build proper reply headers
+/// (In-Reply-To, References, Re: Subject).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SmtpReplyMessageInput {
+    /// Account identifier (defaults to `"default"`)
+    #[serde(default = "default_account_id")]
+    pub account_id: String,
+    /// Stable message ID of the message to reply to
+    pub message_id: String,
+    /// Reply body (plain text)
+    pub body_text: String,
+    /// Reply body (HTML, optional)
+    pub body_html: Option<String>,
+    /// Reply to all recipients (default: false, reply to sender only)
+    #[serde(default)]
+    pub reply_all: bool,
+}
+
+/// Input: forward an existing message via SMTP
+///
+/// Fetches the original message via IMAP and forwards it.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SmtpForwardMessageInput {
+    /// Account identifier (defaults to `"default"`)
+    #[serde(default = "default_account_id")]
+    pub account_id: String,
+    /// Stable message ID of the message to forward
+    pub message_id: String,
+    /// Forward recipients (1..50)
+    pub to: Vec<String>,
+    /// Optional cover note (plain text)
+    pub body_text: Option<String>,
+}
+
+/// Input: verify SMTP account connectivity
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SmtpVerifyAccountInput {
+    /// Account identifier (defaults to `"default"`)
+    #[serde(default = "default_account_id")]
+    pub account_id: String,
+}
+
+/// SMTP account metadata (no credentials)
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SmtpAccountInfo {
+    /// Account identifier
+    pub account_id: String,
+    /// SMTP server hostname
+    pub host: String,
+    /// SMTP server port
+    pub port: u16,
+    /// Security mode (tls, starttls, plain)
+    pub security: String,
+}
+
 /// Mailbox status information
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MailboxStatusInfo {

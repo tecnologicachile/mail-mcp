@@ -22,8 +22,10 @@ mod imap;
 mod message_id;
 mod mime;
 mod models;
+mod oauth2;
 mod pagination;
 mod server;
+mod smtp;
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -129,20 +131,76 @@ fn build_help_output(env_map: &BTreeMap<String, String>) -> String {
     }
     out.push('\n');
 
+    // OAuth2 section
+    let oauth2_sections = discover_oauth2_sections(env_map);
+    out.push_str("OAuth2 environment setup (optional, per account)\n");
+    out.push_str("  MAIL_OAUTH2_<ACCOUNT>_PROVIDER    (google | microsoft)\n");
+    out.push_str("  MAIL_OAUTH2_<ACCOUNT>_CLIENT_ID\n");
+    out.push_str("  MAIL_OAUTH2_<ACCOUNT>_CLIENT_SECRET\n");
+    out.push_str("  MAIL_OAUTH2_<ACCOUNT>_REFRESH_TOKEN\n");
+    out.push_str(
+        "  When set, IMAP PASS becomes optional and XOAUTH2 is used for authentication.\n\n",
+    );
+
+    out.push_str("Discovered OAuth2 sections (from current environment)\n");
+    if oauth2_sections.is_empty() {
+        out.push_str("  (none discovered)\n");
+    } else {
+        for section in &oauth2_sections {
+            out.push_str(&format!("  [{}]\n", section));
+            for suffix in ["PROVIDER", "CLIENT_ID", "CLIENT_SECRET", "REFRESH_TOKEN"] {
+                let key = format!("MAIL_OAUTH2_{}_{}", section, suffix);
+                let value = env_map.get(&key).map(String::as_str);
+                out.push_str(&format!("    {}={}\n", key, redact_value(&key, value)));
+            }
+        }
+    }
+    out.push('\n');
+
+    // SMTP section
+    let smtp_sections = discover_smtp_sections(env_map);
+    out.push_str("SMTP environment setup (optional, per account)\n");
+    out.push_str("  MAIL_SMTP_<ACCOUNT>_HOST\n");
+    out.push_str("  MAIL_SMTP_<ACCOUNT>_PORT       (default: 587)\n");
+    out.push_str("  MAIL_SMTP_<ACCOUNT>_USER\n");
+    out.push_str("  MAIL_SMTP_<ACCOUNT>_PASS       (optional if OAuth2 configured)\n");
+    out.push_str("  MAIL_SMTP_<ACCOUNT>_SECURE     (starttls | tls | plain, default: starttls)\n\n");
+
+    out.push_str("Discovered SMTP sections (from current environment)\n");
+    if smtp_sections.is_empty() {
+        out.push_str("  (none discovered)\n");
+    } else {
+        for section in &smtp_sections {
+            out.push_str(&format!("  [{}]\n", section));
+            for suffix in ["HOST", "PORT", "USER", "PASS", "SECURE"] {
+                let key = format!("MAIL_SMTP_{}_{}", section, suffix);
+                let value = env_map.get(&key).map(String::as_str);
+                out.push_str(&format!("    {}={}\n", key, redact_value(&key, value)));
+            }
+        }
+    }
+    out.push('\n');
+
     out.push_str("Global policy defaults\n");
     out.push_str("  MAIL_IMAP_WRITE_ENABLED=false\n");
     out.push_str("  MAIL_IMAP_CONNECT_TIMEOUT_MS=30000\n");
     out.push_str("  MAIL_IMAP_GREETING_TIMEOUT_MS=15000\n");
     out.push_str("  MAIL_IMAP_SOCKET_TIMEOUT_MS=300000\n");
     out.push_str("  MAIL_IMAP_CURSOR_TTL_SECONDS=600\n");
-    out.push_str("  MAIL_IMAP_CURSOR_MAX_ENTRIES=512\n\n");
+    out.push_str("  MAIL_IMAP_CURSOR_MAX_ENTRIES=512\n");
+    out.push_str("  MAIL_SMTP_WRITE_ENABLED=false\n");
+    out.push_str("  MAIL_SMTP_SAVE_SENT=true\n");
+    out.push_str("  MAIL_SMTP_TIMEOUT_MS=30000\n\n");
 
     out.push_str("Send/write gate policy\n");
     out.push_str(
-        "  Read tools are enabled by default. Write-path tools are blocked unless MAIL_IMAP_WRITE_ENABLED=true.\n",
+        "  IMAP write tools are blocked unless MAIL_IMAP_WRITE_ENABLED=true.\n",
     );
     out.push_str(
-        "  This gate protects against accidental mailbox mutations (copy, move, flag updates, delete).\n",
+        "  SMTP send tools are blocked unless MAIL_SMTP_WRITE_ENABLED=true.\n",
+    );
+    out.push_str(
+        "  These gates protect against accidental mutations and sending.\n",
     );
 
     out
@@ -154,6 +212,53 @@ fn discover_account_sections(env_map: &BTreeMap<String, String>) -> Vec<String> 
         .filter_map(|key| {
             let remainder = key.strip_prefix("MAIL_IMAP_")?;
             for suffix in ["_HOST", "_USER", "_PASS", "_PORT", "_SECURE"] {
+                if let Some(section) = remainder.strip_suffix(suffix)
+                    && !section.is_empty()
+                {
+                    return Some(section.to_owned());
+                }
+            }
+            None
+        })
+        .collect();
+
+    sections.sort();
+    sections.dedup();
+    sections
+}
+
+fn discover_oauth2_sections(env_map: &BTreeMap<String, String>) -> Vec<String> {
+    let mut sections: Vec<String> = env_map
+        .keys()
+        .filter_map(|key| {
+            let remainder = key.strip_prefix("MAIL_OAUTH2_")?;
+            for suffix in [
+                "_PROVIDER",
+                "_CLIENT_ID",
+                "_CLIENT_SECRET",
+                "_REFRESH_TOKEN",
+            ] {
+                if let Some(section) = remainder.strip_suffix(suffix)
+                    && !section.is_empty()
+                {
+                    return Some(section.to_owned());
+                }
+            }
+            None
+        })
+        .collect();
+
+    sections.sort();
+    sections.dedup();
+    sections
+}
+
+fn discover_smtp_sections(env_map: &BTreeMap<String, String>) -> Vec<String> {
+    let mut sections: Vec<String> = env_map
+        .keys()
+        .filter_map(|key| {
+            let remainder = key.strip_prefix("MAIL_SMTP_")?;
+            for suffix in ["_HOST", "_PORT", "_USER", "_PASS", "_SECURE"] {
                 if let Some(section) = remainder.strip_suffix(suffix)
                     && !section.is_empty()
                 {

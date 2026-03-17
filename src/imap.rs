@@ -20,8 +20,9 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 
-use crate::config::{AccountConfig, ServerConfig};
+use crate::config::{AccountConfig, AuthMethod, ServerConfig};
 use crate::errors::{AppError, AppResult};
+use crate::oauth2::{TokenManager, XOAuth2Authenticator};
 
 /// Wrapper enum that supports both TLS and plaintext IMAP streams.
 #[derive(Debug)]
@@ -88,7 +89,7 @@ fn socket_timeout(server: &ServerConfig) -> Duration {
 /// 1. TCP connect
 /// 2. TLS handshake (if `secure: true`) or plaintext (if `secure: false`)
 /// 3. Read IMAP greeting
-/// 4. LOGIN authentication
+/// 4. Authentication (LOGIN or XOAUTH2 depending on `auth_method`)
 ///
 /// # Security
 ///
@@ -101,7 +102,7 @@ fn socket_timeout(server: &ServerConfig) -> Duration {
 /// - TCP connect: `connect_timeout_ms`
 /// - TLS handshake: `greeting_timeout_ms` (TLS mode only)
 /// - Greeting read: `greeting_timeout_ms`
-/// - LOGIN: `greeting_timeout_ms`
+/// - LOGIN/AUTHENTICATE: `greeting_timeout_ms`
 ///
 /// # Errors
 ///
@@ -112,6 +113,7 @@ fn socket_timeout(server: &ServerConfig) -> Duration {
 pub async fn connect_authenticated(
     server: &ServerConfig,
     account: &AccountConfig,
+    token_manager: Option<&TokenManager>,
 ) -> AppResult<ImapSession> {
     let connect_duration = Duration::from_millis(server.connect_timeout_ms);
     let greeting_duration = Duration::from_millis(server.greeting_timeout_ms);
@@ -156,20 +158,58 @@ pub async fn connect_authenticated(
         ));
     }
 
-    let pass = account.pass.expose_secret();
-    let session = timeout(greeting_duration, client.login(account.user.as_str(), pass))
-        .await
-        .map_err(|_| AppError::Timeout("IMAP login timeout".to_owned()))
-        .and_then(|r| {
-            r.map_err(|(e, _)| {
-                let msg = e.to_string();
-                if msg.to_ascii_lowercase().contains("auth") || msg.contains("LOGIN") {
-                    AppError::AuthFailed(msg)
-                } else {
-                    AppError::Internal(msg)
-                }
-            })
-        })?;
+    let session = match account.auth_method {
+        AuthMethod::OAuth2 => {
+            let tm = token_manager.ok_or_else(|| {
+                AppError::Internal(format!(
+                    "account '{}' requires OAuth2 but no token manager available",
+                    account.account_id
+                ))
+            })?;
+            let access_token = tm.get_access_token(&account.account_id).await?;
+            let authenticator = XOAuth2Authenticator::new(&account.user, &access_token);
+
+            timeout(
+                greeting_duration,
+                client.authenticate("XOAUTH2", authenticator),
+            )
+            .await
+            .map_err(|_| AppError::Timeout("IMAP XOAUTH2 authenticate timeout".to_owned()))
+            .and_then(|r| {
+                r.map_err(|(e, _)| {
+                    let msg = e.to_string();
+                    AppError::AuthFailed(format!("XOAUTH2 authentication failed: {msg}"))
+                })
+            })?
+        }
+        AuthMethod::Password => {
+            let pass = account
+                .pass
+                .as_ref()
+                .ok_or_else(|| {
+                    AppError::Internal(format!(
+                        "account '{}' uses password auth but no password configured",
+                        account.account_id
+                    ))
+                })?;
+            timeout(
+                greeting_duration,
+                client.login(account.user.as_str(), pass.expose_secret()),
+            )
+            .await
+            .map_err(|_| AppError::Timeout("IMAP login timeout".to_owned()))
+            .and_then(|r| {
+                r.map_err(|(e, _)| {
+                    let msg = e.to_string();
+                    if msg.to_ascii_lowercase().contains("auth") || msg.contains("LOGIN") {
+                        AppError::AuthFailed(msg)
+                    } else {
+                        AppError::Internal(msg)
+                    }
+                })
+            })?
+        }
+    };
 
     Ok(session)
 }
@@ -698,7 +738,8 @@ mod tests {
             port: endpoints.imap_port,
             secure: true,
             user: endpoints.user.clone(),
-            pass: SecretString::new(endpoints.pass.clone().into()),
+            pass: Some(SecretString::new(endpoints.pass.clone().into())),
+            auth_method: crate::config::AuthMethod::Password,
         };
 
         let mut accounts = BTreeMap::new();
@@ -706,6 +747,11 @@ mod tests {
 
         ServerConfig {
             accounts,
+            oauth2_accounts: std::collections::HashMap::new(),
+            smtp_accounts: std::collections::HashMap::new(),
+            smtp_write_enabled: false,
+            smtp_save_sent: false,
+            smtp_timeout_ms: 30_000,
             write_enabled: true,
             connect_timeout_ms: 5_000,
             greeting_timeout_ms: 5_000,
@@ -795,7 +841,7 @@ mod tests {
             .map_err(|_| "TLS handshake timeout".to_owned())
             .and_then(|r| r.map_err(|e| format!("TLS handshake failed: {e}")))?;
 
-        let mut client = Client::new(tls_stream);
+        let mut client = Client::new(super::ImapStream::Tls(tls_stream));
         let greeting = timeout(greeting_duration, client.read_response())
             .await
             .map_err(|_| "IMAP greeting timeout".to_owned())
@@ -806,7 +852,7 @@ mod tests {
 
         let login = timeout(
             greeting_duration,
-            client.login(account.user.as_str(), account.pass.expose_secret()),
+            client.login(account.user.as_str(), account.pass.as_ref().unwrap().expose_secret()),
         )
         .await
         .map_err(|_| "IMAP login timeout".to_owned())?;

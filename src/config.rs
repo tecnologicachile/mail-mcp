@@ -4,7 +4,7 @@
 //! `MAIL_IMAP_<SEGMENT>_<KEY>`. Account segments are discovered by scanning for
 //! `MAIL_IMAP_*_HOST` variables.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::env::VarError;
 
@@ -12,11 +12,24 @@ use regex::Regex;
 use secrecy::SecretString;
 
 use crate::errors::{AppError, AppResult};
+use crate::oauth2::{OAuth2AccountConfig, OAuth2Provider};
+use crate::smtp::{SmtpAccountConfig, SmtpSecurity};
+
+/// Authentication method for an IMAP/SMTP account
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMethod {
+    /// Traditional username/password (LOGIN command)
+    Password,
+    /// OAuth2 XOAUTH2 SASL mechanism
+    OAuth2,
+}
 
 /// IMAP account configuration
 ///
 /// Holds connection details and credentials for a single IMAP account.
 /// Passwords are stored using `SecretString` to prevent accidental logging.
+/// When `auth_method` is `OAuth2`, `pass` may be `None` and authentication
+/// uses the token manager instead.
 #[derive(Debug, Clone)]
 pub struct AccountConfig {
     /// Account identifier (lowercase, used as default `account_id` parameter)
@@ -29,8 +42,11 @@ pub struct AccountConfig {
     pub secure: bool,
     /// Username for authentication
     pub user: String,
-    /// Password stored in a type that prevents accidental logging
-    pub pass: SecretString,
+    /// Password stored in a type that prevents accidental logging.
+    /// Optional when OAuth2 is used.
+    pub pass: Option<SecretString>,
+    /// Authentication method (password or OAuth2)
+    pub auth_method: AuthMethod,
 }
 
 /// Server-wide configuration
@@ -39,8 +55,18 @@ pub struct AccountConfig {
 /// handlers via `Arc` for thread-safe shared access.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// All configured accounts, keyed by `account_id`
+    /// All configured IMAP accounts, keyed by `account_id`
     pub accounts: BTreeMap<String, AccountConfig>,
+    /// OAuth2 configurations keyed by `account_id` (only for accounts using OAuth2)
+    pub oauth2_accounts: HashMap<String, OAuth2AccountConfig>,
+    /// Configured SMTP accounts, keyed by `account_id`
+    pub smtp_accounts: HashMap<String, SmtpAccountConfig>,
+    /// Whether SMTP send operations are enabled
+    pub smtp_write_enabled: bool,
+    /// Whether to save sent messages to IMAP Sent folder
+    pub smtp_save_sent: bool,
+    /// SMTP operation timeout in milliseconds
+    pub smtp_timeout_ms: u64,
     /// Whether write operations (copy, move, delete, flag updates) are enabled
     pub write_enabled: bool,
     /// TCP connection timeout in milliseconds
@@ -80,6 +106,9 @@ impl ServerConfig {
     /// MAIL_IMAP_WRITE_ENABLED=false
     /// ```
     pub fn load_from_env() -> AppResult<Self> {
+        // Discover OAuth2 accounts first (needed to determine auth method)
+        let oauth2_accounts = load_oauth2_accounts()?;
+
         let account_pattern = Regex::new(r"^MAIL_IMAP_([A-Z0-9_]+)_HOST$")
             .map_err(|e| AppError::Internal(format!("invalid account regex: {e}")))?;
 
@@ -99,13 +128,20 @@ impl ServerConfig {
         account_segments.dedup();
 
         let mut accounts = BTreeMap::new();
-        for seg in account_segments {
-            let account = load_account(&seg)?;
+        for seg in &account_segments {
+            let account = load_account(seg, &oauth2_accounts)?;
             accounts.insert(account.account_id.clone(), account);
         }
 
+        let smtp_accounts = load_smtp_accounts(&oauth2_accounts)?;
+
         Ok(Self {
             accounts,
+            oauth2_accounts,
+            smtp_accounts,
+            smtp_write_enabled: parse_bool_env("MAIL_SMTP_WRITE_ENABLED", false)?,
+            smtp_save_sent: parse_bool_env("MAIL_SMTP_SAVE_SENT", true)?,
+            smtp_timeout_ms: parse_u64_env("MAIL_SMTP_TIMEOUT_MS", 30_000)?,
             write_enabled: parse_bool_env("MAIL_IMAP_WRITE_ENABLED", false)?,
             connect_timeout_ms: parse_u64_env("MAIL_IMAP_CONNECT_TIMEOUT_MS", 30_000)?,
             greeting_timeout_ms: parse_u64_env("MAIL_IMAP_GREETING_TIMEOUT_MS", 15_000)?,
@@ -115,7 +151,7 @@ impl ServerConfig {
         })
     }
 
-    /// Get account configuration by ID
+    /// Get IMAP account configuration by ID
     ///
     /// # Errors
     ///
@@ -123,7 +159,20 @@ impl ServerConfig {
     pub fn get_account(&self, account_id: &str) -> AppResult<&AccountConfig> {
         self.accounts
             .get(account_id)
-            .ok_or_else(|| AppError::NotFound(format!("account '{account_id}' is not configured")))
+            .ok_or_else(|| AppError::NotFound(format!("IMAP account '{account_id}' is not configured")))
+    }
+
+    /// Get SMTP account configuration by ID
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotFound` if the SMTP account ID is not configured.
+    pub fn get_smtp_account(&self, account_id: &str) -> AppResult<&SmtpAccountConfig> {
+        self.smtp_accounts
+            .get(account_id)
+            .ok_or_else(|| {
+                AppError::NotFound(format!("SMTP account '{account_id}' is not configured"))
+            })
     }
 }
 
@@ -132,24 +181,190 @@ impl ServerConfig {
 /// Reads `MAIL_IMAP_<SEGMENT>_HOST`, `_USER`, `_PASS`, `_PORT`, and `_SECURE`.
 /// Normalizes the segment name to lowercase for `account_id` (except `DEFAULT`
 /// becomes `default`).
-fn load_account(segment: &str) -> AppResult<AccountConfig> {
+///
+/// When a matching OAuth2 configuration exists for this segment, `PASS` becomes
+/// optional and `auth_method` is set to `OAuth2`.
+fn load_account(
+    segment: &str,
+    oauth2_accounts: &HashMap<String, OAuth2AccountConfig>,
+) -> AppResult<AccountConfig> {
     let prefix = format!("MAIL_IMAP_{}_", sanitize_segment(segment));
+    let account_id = if segment == "DEFAULT" {
+        "default".to_owned()
+    } else {
+        segment.to_ascii_lowercase()
+    };
+
+    let has_oauth2 = oauth2_accounts.contains_key(&account_id);
+
     let host = required_env(&format!("{prefix}HOST"))?;
     let user = required_env(&format!("{prefix}USER"))?;
-    let pass = required_env(&format!("{prefix}PASS"))?;
+
+    // Password is optional when OAuth2 is configured for this account
+    let pass = match env::var(&format!("{prefix}PASS")) {
+        Ok(v) if !v.trim().is_empty() => Some(SecretString::new(v.into())),
+        _ if has_oauth2 => None,
+        _ => {
+            return Err(AppError::InvalidInput(format!(
+                "No IMAP accounts configured. Set MAIL_IMAP_<ID>_HOST/USER/PASS (or configure OAuth2 via MAIL_OAUTH2_<ID>_*).\nmail-imap-mcp-rs startup error: missing PASS."
+            )));
+        }
+    };
+
+    let auth_method = if has_oauth2 {
+        AuthMethod::OAuth2
+    } else {
+        AuthMethod::Password
+    };
 
     Ok(AccountConfig {
-        account_id: if segment == "DEFAULT" {
-            "default".to_owned()
-        } else {
-            segment.to_ascii_lowercase()
-        },
+        account_id,
         host,
         port: parse_u16_env(&format!("{prefix}PORT"), 993)?,
         secure: parse_bool_env(&format!("{prefix}SECURE"), true)?,
         user,
-        pass: SecretString::new(pass.into()),
+        pass,
+        auth_method,
     })
+}
+
+/// Discover and load OAuth2 account configurations from environment.
+///
+/// Scans for `MAIL_OAUTH2_*_PROVIDER` variables. For each found, loads
+/// `CLIENT_ID`, `CLIENT_SECRET`, and `REFRESH_TOKEN`.
+fn load_oauth2_accounts() -> AppResult<HashMap<String, OAuth2AccountConfig>> {
+    let pattern = Regex::new(r"^MAIL_OAUTH2_([A-Z0-9_]+)_PROVIDER$")
+        .map_err(|e| AppError::Internal(format!("invalid oauth2 regex: {e}")))?;
+
+    let mut segments: Vec<String> = env::vars()
+        .filter_map(|(k, _)| {
+            pattern
+                .captures(&k)
+                .and_then(|c| c.get(1).map(|m| m.as_str().to_owned()))
+        })
+        .collect();
+    segments.sort();
+    segments.dedup();
+
+    let mut oauth2_accounts = HashMap::new();
+    for seg in segments {
+        let prefix = format!("MAIL_OAUTH2_{}_", sanitize_segment(&seg));
+        let account_id = if seg == "DEFAULT" {
+            "default".to_owned()
+        } else {
+            seg.to_ascii_lowercase()
+        };
+
+        let provider_str = required_oauth2_env(&format!("{prefix}PROVIDER"), &account_id)?;
+        let provider = OAuth2Provider::parse(&provider_str)?;
+        let client_id = required_oauth2_env(&format!("{prefix}CLIENT_ID"), &account_id)?;
+        let client_secret = required_oauth2_env(&format!("{prefix}CLIENT_SECRET"), &account_id)?;
+        let refresh_token = required_oauth2_env(&format!("{prefix}REFRESH_TOKEN"), &account_id)?;
+
+        oauth2_accounts.insert(
+            account_id,
+            OAuth2AccountConfig {
+                provider,
+                client_id,
+                client_secret: SecretString::new(client_secret.into()),
+                refresh_token: SecretString::new(refresh_token.into()),
+            },
+        );
+    }
+
+    Ok(oauth2_accounts)
+}
+
+/// Discover and load SMTP account configurations from environment.
+///
+/// Scans for `MAIL_SMTP_*_HOST` variables. For each found, loads
+/// `PORT`, `USER`, `PASS`, and `SECURE`. OAuth2 configs are checked to
+/// determine the authentication method.
+fn load_smtp_accounts(
+    oauth2_accounts: &HashMap<String, OAuth2AccountConfig>,
+) -> AppResult<HashMap<String, SmtpAccountConfig>> {
+    let pattern = Regex::new(r"^MAIL_SMTP_([A-Z0-9_]+)_HOST$")
+        .map_err(|e| AppError::Internal(format!("invalid smtp regex: {e}")))?;
+
+    let mut segments: Vec<String> = env::vars()
+        .filter_map(|(k, _)| {
+            pattern
+                .captures(&k)
+                .and_then(|c| c.get(1).map(|m| m.as_str().to_owned()))
+        })
+        .collect();
+    segments.sort();
+    segments.dedup();
+
+    let mut smtp_accounts = HashMap::new();
+    for seg in segments {
+        let prefix = format!("MAIL_SMTP_{}_", sanitize_segment(&seg));
+        let account_id = if seg == "DEFAULT" {
+            "default".to_owned()
+        } else {
+            seg.to_ascii_lowercase()
+        };
+
+        let has_oauth2 = oauth2_accounts.contains_key(&account_id);
+
+        let host = required_smtp_env(&format!("{prefix}HOST"), &account_id)?;
+        let user = required_smtp_env(&format!("{prefix}USER"), &account_id)?;
+
+        let pass = match env::var(format!("{prefix}PASS")) {
+            Ok(v) if !v.trim().is_empty() => Some(SecretString::new(v.into())),
+            _ if has_oauth2 => None,
+            _ => None, // SMTP password is optional (some configs rely on OAuth2 only)
+        };
+
+        let default_port: u16 = 587; // STARTTLS default
+        let port = parse_u16_env(&format!("{prefix}PORT"), default_port)?;
+
+        let security = match env::var(format!("{prefix}SECURE")) {
+            Ok(v) if !v.trim().is_empty() => SmtpSecurity::parse(&v)?,
+            _ => SmtpSecurity::Starttls,
+        };
+
+        let auth_method = if has_oauth2 {
+            AuthMethod::OAuth2
+        } else {
+            AuthMethod::Password
+        };
+
+        smtp_accounts.insert(
+            account_id.clone(),
+            SmtpAccountConfig {
+                account_id,
+                host,
+                port,
+                user,
+                pass,
+                security,
+                auth_method,
+            },
+        );
+    }
+
+    Ok(smtp_accounts)
+}
+
+/// Read a required SMTP environment variable, with a clear error message.
+fn required_smtp_env(key: &str, account_id: &str) -> AppResult<String> {
+    match env::var(key) {
+        Ok(v) if !v.trim().is_empty() => Ok(v),
+        _ => Err(AppError::InvalidInput(format!(
+            "SMTP account '{account_id}' is missing {key}"
+        ))),
+    }
+}
+
+/// Read a required OAuth2 environment variable, with a clear error message.
+fn required_oauth2_env(key: &str, account_id: &str) -> AppResult<String> {
+    match env::var(key) {
+        Ok(v) if !v.trim().is_empty() => Ok(v),
+        _ => Err(AppError::InvalidInput(format!(
+            "OAuth2 account '{account_id}' is missing {key}"
+        ))),
+    }
 }
 
 /// Read a required environment variable, returning error if missing or empty

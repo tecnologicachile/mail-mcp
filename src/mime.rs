@@ -247,6 +247,26 @@ fn to_header_map(headers: &[(String, String)]) -> BTreeMap<String, String> {
 /// Truncate string to maximum characters (Unicode-aware)
 ///
 /// Preserves complete characters, never splitting multi-byte sequences.
+/// Extract plain text body from a parsed email message.
+///
+/// Walks the MIME parts and returns the first `text/plain` body found.
+/// Returns `None` if no text/plain part exists.
+pub fn extract_body_text(parsed: &mailparse::ParsedMail<'_>) -> Option<String> {
+    if parsed.subparts.is_empty() {
+        let ct = parsed.ctype.mimetype.to_ascii_lowercase();
+        if ct == "text/plain" || ct == "text" {
+            return parsed.get_body().ok();
+        }
+        return None;
+    }
+    for sub in &parsed.subparts {
+        if let Some(text) = extract_body_text(sub) {
+            return Some(text);
+        }
+    }
+    None
+}
+
 pub fn truncate_chars(input: String, max_chars: usize) -> String {
     input.chars().take(max_chars).collect()
 }

@@ -25,10 +25,12 @@ use crate::models::{
     BulkUpdateFlagsInput, CopyMessageInput, CreateMailboxInput, DeleteMailboxInput,
     DeleteMessageInput, GetMessageInput, GetMessageRawInput, MailboxInfo, MailboxStatusInfo,
     MailboxStatusInput, MessageDetail, MessageSummary, Meta, MoveMessageInput, RenameMailboxInput,
-    SearchAndDeleteInput, SearchAndMoveInput, SearchMessagesInput, ToolEnvelope,
-    UpdateMessageFlagsInput,
+    SearchAndDeleteInput, SearchAndMoveInput, SearchMessagesInput, SmtpAccountInfo,
+    SmtpForwardMessageInput, SmtpReplyMessageInput, SmtpSendMessageInput, SmtpVerifyAccountInput,
+    ToolEnvelope, UpdateMessageFlagsInput,
 };
 use crate::pagination::{CursorEntry, CursorStore};
+use crate::smtp;
 
 /// Maximum messages per search result page
 const MAX_SEARCH_LIMIT: usize = 50;
@@ -49,6 +51,8 @@ pub struct MailImapServer {
     config: Arc<ServerConfig>,
     /// Cursor store for search pagination (protected by mutex)
     cursors: Arc<Mutex<CursorStore>>,
+    /// OAuth2 token manager (present when any account uses OAuth2)
+    token_manager: Option<Arc<crate::oauth2::TokenManager>>,
     /// Tool router for dispatching MCP tool calls
     tool_router: ToolRouter<Self>,
 }
@@ -60,9 +64,17 @@ impl MailImapServer {
     /// Initializes cursor store with configured TTL and max entries.
     pub fn new(config: ServerConfig) -> Self {
         let cursor_store = CursorStore::new(config.cursor_ttl_seconds, config.cursor_max_entries);
+        let token_manager = if config.oauth2_accounts.is_empty() {
+            None
+        } else {
+            Some(Arc::new(crate::oauth2::TokenManager::new(
+                config.oauth2_accounts.clone(),
+            )))
+        };
         Self {
             config: Arc::new(config),
             cursors: Arc::new(Mutex::new(cursor_store)),
+            token_manager,
             tool_router: Self::tool_router(),
         }
     }
@@ -505,6 +517,87 @@ impl MailImapServer {
         });
         finalize_tool(started, "imap_search_and_delete", result)
     }
+
+    // ─── SMTP Tools ──────────────────────────────────────────────────────────
+
+    /// Tool: List configured SMTP accounts
+    #[tool(
+        name = "smtp_list_accounts",
+        description = "List configured SMTP accounts"
+    )]
+    async fn smtp_list_accounts(&self) -> Result<Json<ToolEnvelope<serde_json::Value>>, ErrorData> {
+        let started = Instant::now();
+        let accounts: Vec<SmtpAccountInfo> = self
+            .config
+            .smtp_accounts
+            .values()
+            .map(|a| SmtpAccountInfo {
+                account_id: a.account_id.clone(),
+                host: a.host.clone(),
+                port: a.port,
+                security: format!("{:?}", a.security).to_ascii_lowercase(),
+            })
+            .collect();
+        let data = serde_json::json!({ "accounts": accounts });
+        let summary = format!("{} SMTP account(s) configured", accounts.len());
+        finalize_tool(started, "smtp_list_accounts", Ok((summary, data)))
+    }
+
+    /// Tool: Send a new email via SMTP
+    #[tool(
+        name = "smtp_send_message",
+        description = "Send a new email via SMTP"
+    )]
+    async fn smtp_send_message(
+        &self,
+        Parameters(input): Parameters<SmtpSendMessageInput>,
+    ) -> Result<Json<ToolEnvelope<serde_json::Value>>, ErrorData> {
+        let started = Instant::now();
+        let result = self.smtp_send_message_impl(input).await;
+        finalize_tool(started, "smtp_send_message", result)
+    }
+
+    /// Tool: Reply to a message via SMTP
+    #[tool(
+        name = "smtp_reply_message",
+        description = "Reply to an existing message via SMTP (fetches original for proper threading)"
+    )]
+    async fn smtp_reply_message(
+        &self,
+        Parameters(input): Parameters<SmtpReplyMessageInput>,
+    ) -> Result<Json<ToolEnvelope<serde_json::Value>>, ErrorData> {
+        let started = Instant::now();
+        let result = self.smtp_reply_message_impl(input).await;
+        finalize_tool(started, "smtp_reply_message", result)
+    }
+
+    /// Tool: Forward a message via SMTP
+    #[tool(
+        name = "smtp_forward_message",
+        description = "Forward an existing message via SMTP"
+    )]
+    async fn smtp_forward_message(
+        &self,
+        Parameters(input): Parameters<SmtpForwardMessageInput>,
+    ) -> Result<Json<ToolEnvelope<serde_json::Value>>, ErrorData> {
+        let started = Instant::now();
+        let result = self.smtp_forward_message_impl(input).await;
+        finalize_tool(started, "smtp_forward_message", result)
+    }
+
+    /// Tool: Verify SMTP connectivity
+    #[tool(
+        name = "smtp_verify_account",
+        description = "Test SMTP account connectivity and authentication"
+    )]
+    async fn smtp_verify_account(
+        &self,
+        Parameters(input): Parameters<SmtpVerifyAccountInput>,
+    ) -> Result<Json<ToolEnvelope<serde_json::Value>>, ErrorData> {
+        let started = Instant::now();
+        let result = self.smtp_verify_account_impl(input).await;
+        finalize_tool(started, "smtp_verify_account", result)
+    }
 }
 
 /// MCP server handler implementation
@@ -515,7 +608,7 @@ impl ServerHandler for MailImapServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "Secure IMAP MCP server. Read operations are enabled by default; write tools require MAIL_IMAP_WRITE_ENABLED=true.".to_owned(),
+                "Secure IMAP MCP server. Read operations are enabled by default; write tools require MAIL_IMAP_WRITE_ENABLED=true. SMTP send tools require MAIL_SMTP_WRITE_ENABLED=true.".to_owned(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
@@ -565,6 +658,7 @@ impl ToolIssue {
             AppError::AuthFailed(_) => ("auth_failed", false),
             AppError::Timeout(_) => ("timeout", true),
             AppError::Conflict(_) => ("conflict", false),
+            AppError::TokenRefresh(_) => ("token_refresh_failed", true),
             AppError::Internal(_) => ("internal", true),
         };
         Self {
@@ -607,7 +701,7 @@ impl MailImapServer {
         let started = Instant::now();
         let mut issues = Vec::new();
 
-        let mut session = match imap::connect_authenticated(&self.config, account).await {
+        let mut session = match imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await {
             Ok(session) => session,
             Err(error) => {
                 issues.push(ToolIssue::from_error("connect_authenticated", &error));
@@ -671,7 +765,7 @@ impl MailImapServer {
         let account = self.config.get_account(&input.account_id)?;
         let mut issues = Vec::new();
 
-        let mut session = match imap::connect_authenticated(&self.config, account).await {
+        let mut session = match imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await {
             Ok(session) => session,
             Err(error) => {
                 issues.push(ToolIssue::from_error("connect_authenticated", &error));
@@ -738,7 +832,7 @@ impl MailImapServer {
         validate_account_id(&input.account_id)?;
         validate_mailbox(&input.mailbox)?;
         let account = self.config.get_account(&input.account_id)?;
-        let mut session = match imap::connect_authenticated(&self.config, account).await {
+        let mut session = match imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await {
             Ok(session) => session,
             Err(error) => {
                 let issue = ToolIssue::from_error("connect_authenticated", &error);
@@ -955,7 +1049,7 @@ impl MailImapServer {
         let account = self.config.get_account(&input.account_id)?;
         let mut issues = Vec::new();
 
-        let mut session = match imap::connect_authenticated(&self.config, account).await {
+        let mut session = match imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await {
             Ok(session) => session,
             Err(error) => {
                 issues.push(
@@ -1120,7 +1214,7 @@ impl MailImapServer {
 
         let account = self.config.get_account(&input.account_id)?;
         let mut issues = Vec::new();
-        let mut session = match imap::connect_authenticated(&self.config, account).await {
+        let mut session = match imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await {
             Ok(session) => session,
             Err(error) => {
                 issues.push(
@@ -1227,7 +1321,7 @@ impl MailImapServer {
         let account = self.config.get_account(&input.account_id)?;
         let mut issues = Vec::new();
 
-        let mut session = match imap::connect_authenticated(&self.config, account).await {
+        let mut session = match imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await {
             Ok(session) => session,
             Err(error) => {
                 issues.push(
@@ -1340,7 +1434,7 @@ impl MailImapServer {
         if destination_account_id == input.account_id {
             let account = self.config.get_account(&input.account_id)?;
             steps_attempted += 1;
-            let mut session = match imap::connect_authenticated(&self.config, account).await {
+            let mut session = match imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await {
                 Ok(session) => {
                     steps_succeeded += 1;
                     session
@@ -1392,7 +1486,7 @@ impl MailImapServer {
         } else {
             let source = self.config.get_account(&input.account_id)?;
             steps_attempted += 1;
-            let mut source_session = match imap::connect_authenticated(&self.config, source).await {
+            let mut source_session = match imap::connect_authenticated(&self.config, source, self.token_manager.as_deref()).await {
                 Ok(session) => {
                     steps_succeeded += 1;
                     session
@@ -1463,7 +1557,7 @@ impl MailImapServer {
             let destination = self.config.get_account(&destination_account_id)?;
             steps_attempted += 1;
             let mut destination_session =
-                match imap::connect_authenticated(&self.config, destination).await {
+                match imap::connect_authenticated(&self.config, destination, self.token_manager.as_deref()).await {
                     Ok(session) => {
                         steps_succeeded += 1;
                         session
@@ -1550,7 +1644,7 @@ impl MailImapServer {
         let mut steps_succeeded = 0usize;
 
         steps_attempted += 1;
-        let mut session = match imap::connect_authenticated(&self.config, account).await {
+        let mut session = match imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await {
             Ok(session) => {
                 steps_succeeded += 1;
                 session
@@ -1733,7 +1827,7 @@ impl MailImapServer {
         let mut steps_succeeded = 0usize;
 
         steps_attempted += 1;
-        let mut session = match imap::connect_authenticated(&self.config, account).await {
+        let mut session = match imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await {
             Ok(session) => {
                 steps_succeeded += 1;
                 session
@@ -1825,7 +1919,7 @@ impl MailImapServer {
         validate_mailbox(&input.mailbox_name)?;
 
         let account = self.config.get_account(&input.account_id)?;
-        let mut session = imap::connect_authenticated(&self.config, account).await?;
+        let mut session = imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await?;
         imap::create_mailbox(&self.config, &mut session, &input.mailbox_name).await?;
 
         Ok(serde_json::json!({
@@ -1849,7 +1943,7 @@ impl MailImapServer {
         }
 
         let account = self.config.get_account(&input.account_id)?;
-        let mut session = imap::connect_authenticated(&self.config, account).await?;
+        let mut session = imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await?;
         imap::delete_mailbox(&self.config, &mut session, &input.mailbox_name).await?;
 
         Ok(serde_json::json!({
@@ -1869,7 +1963,7 @@ impl MailImapServer {
         validate_mailbox(&input.to_name)?;
 
         let account = self.config.get_account(&input.account_id)?;
-        let mut session = imap::connect_authenticated(&self.config, account).await?;
+        let mut session = imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await?;
         imap::rename_mailbox(&self.config, &mut session, &input.from_name, &input.to_name).await?;
 
         Ok(serde_json::json!({
@@ -1888,7 +1982,7 @@ impl MailImapServer {
         validate_mailbox(&input.mailbox)?;
 
         let account = self.config.get_account(&input.account_id)?;
-        let mut session = imap::connect_authenticated(&self.config, account).await?;
+        let mut session = imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await?;
         let (messages, unseen, recent) =
             imap::mailbox_status(&self.config, &mut session, &input.mailbox).await?;
 
@@ -1937,7 +2031,7 @@ impl MailImapServer {
         let limit = input.limit.clamp(1, MAX_BULK_IDS);
 
         let account = self.config.get_account(&input.account_id)?;
-        let mut session = imap::connect_authenticated(&self.config, account).await?;
+        let mut session = imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await?;
 
         // Search (read-only SELECT via EXAMINE)
         let uidvalidity =
@@ -2041,7 +2135,7 @@ impl MailImapServer {
         let limit = input.limit.clamp(1, MAX_BULK_IDS);
 
         let account = self.config.get_account(&input.account_id)?;
-        let mut session = imap::connect_authenticated(&self.config, account).await?;
+        let mut session = imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await?;
 
         let uidvalidity =
             imap::select_mailbox_readonly(&self.config, &mut session, &input.mailbox).await?;
@@ -2113,7 +2207,7 @@ impl MailImapServer {
             .join(",");
 
         let account = self.config.get_account(&input.account_id)?;
-        let mut session = imap::connect_authenticated(&self.config, account).await?;
+        let mut session = imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await?;
 
         let uidvalidity =
             imap::select_mailbox_readwrite(&self.config, &mut session, &parsed.mailbox).await?;
@@ -2168,7 +2262,7 @@ impl MailImapServer {
             .join(",");
 
         let account = self.config.get_account(&input.account_id)?;
-        let mut session = imap::connect_authenticated(&self.config, account).await?;
+        let mut session = imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await?;
 
         let uidvalidity =
             imap::select_mailbox_readwrite(&self.config, &mut session, &parsed.mailbox).await?;
@@ -2226,7 +2320,7 @@ impl MailImapServer {
             .join(",");
 
         let account = self.config.get_account(&input.account_id)?;
-        let mut session = imap::connect_authenticated(&self.config, account).await?;
+        let mut session = imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await?;
 
         let uidvalidity =
             imap::select_mailbox_readwrite(&self.config, &mut session, &parsed.mailbox).await?;
@@ -2279,7 +2373,7 @@ impl MailImapServer {
         }
 
         let account = self.config.get_account(&input.account_id)?;
-        let mut session = imap::connect_authenticated(&self.config, account).await?;
+        let mut session = imap::connect_authenticated(&self.config, account, self.token_manager.as_deref()).await?;
         imap::append(
             &self.config,
             &mut session,
@@ -2294,6 +2388,392 @@ impl MailImapServer {
             "mailbox": input.mailbox,
             "size_bytes": input.raw_message.len(),
         }))
+    }
+
+    // ─── SMTP impl methods ───────────────────────────────────────────────────
+
+    async fn smtp_send_message_impl(
+        &self,
+        input: SmtpSendMessageInput,
+    ) -> AppResult<(String, serde_json::Value)> {
+        require_smtp_write_enabled(&self.config)?;
+        validate_account_id(&input.account_id)?;
+        validate_email_recipients(&input.to, "to")?;
+        if !input.cc.is_empty() {
+            validate_email_recipients(&input.cc, "cc")?;
+        }
+        if !input.bcc.is_empty() {
+            validate_email_recipients(&input.bcc, "bcc")?;
+        }
+        if input.subject.is_empty() || input.subject.len() > 998 {
+            return Err(AppError::invalid("subject must be 1..998 characters"));
+        }
+        if input.body_text.is_none() && input.body_html.is_none() {
+            return Err(AppError::invalid(
+                "at least one of body_text or body_html is required",
+            ));
+        }
+
+        let smtp_config = self.config.get_smtp_account(&input.account_id)?;
+
+        let composition = smtp::EmailComposition {
+            from: smtp_config.user.clone(),
+            to: input.to.clone(),
+            cc: input.cc.clone(),
+            bcc: input.bcc.clone(),
+            subject: input.subject.clone(),
+            body_text: input.body_text,
+            body_html: input.body_html,
+            reply_to: input.reply_to,
+            in_reply_to: input.in_reply_to,
+            references: input.references,
+        };
+
+        let message_id = smtp::send_email(
+            smtp_config,
+            self.token_manager.as_deref(),
+            self.config.smtp_timeout_ms,
+            &composition,
+        )
+        .await?;
+
+        // Optionally save to Sent folder via IMAP
+        if self.config.smtp_save_sent {
+            if let Err(e) = self
+                .save_to_sent_folder(&input.account_id, &composition)
+                .await
+            {
+                warn!(
+                    account_id = input.account_id,
+                    "failed to save sent message to IMAP Sent folder: {e}"
+                );
+            }
+        }
+
+        let recipient_count = input.to.len() + input.cc.len() + input.bcc.len();
+        let summary = format!("Email sent to {recipient_count} recipient(s)");
+        let data = serde_json::json!({
+            "status": "ok",
+            "account_id": input.account_id,
+            "message_id": message_id,
+            "recipients_count": recipient_count,
+        });
+        Ok((summary, data))
+    }
+
+    async fn smtp_reply_message_impl(
+        &self,
+        input: SmtpReplyMessageInput,
+    ) -> AppResult<(String, serde_json::Value)> {
+        require_smtp_write_enabled(&self.config)?;
+        validate_account_id(&input.account_id)?;
+
+        // Fetch original message headers via IMAP
+        let msg_id = MessageId::parse(&input.message_id)?;
+        let account = self.config.get_account(&input.account_id)?;
+        let mut session =
+            imap::connect_authenticated(&self.config, account, self.token_manager.as_deref())
+                .await?;
+        let uidvalidity =
+            imap::select_mailbox_readonly(&self.config, &mut session, &msg_id.mailbox).await?;
+        if uidvalidity != msg_id.uidvalidity {
+            return Err(AppError::Conflict(format!(
+                "UIDVALIDITY mismatch: message_id has {} but mailbox has {}",
+                msg_id.uidvalidity, uidvalidity
+            )));
+        }
+
+        let raw_bytes = imap::fetch_raw_message(&self.config, &mut session, msg_id.uid).await?;
+        let parsed = mailparse::parse_mail(&raw_bytes)
+            .map_err(|e| AppError::Internal(format!("failed to parse original message: {e}")))?;
+
+        // Extract headers for reply
+        let get_header = |name: &str| -> Option<String> {
+            parsed
+                .headers
+                .iter()
+                .find(|h| h.get_key().eq_ignore_ascii_case(name))
+                .map(|h| h.get_value())
+        };
+
+        let original_from = get_header("From").unwrap_or_default();
+        let original_to = get_header("To").unwrap_or_default();
+        let original_cc = get_header("Cc");
+        let original_subject = get_header("Subject").unwrap_or_default();
+        let original_message_id = get_header("Message-ID").unwrap_or_default();
+        let original_references = get_header("References");
+
+        // Build reply subject
+        let reply_subject = if original_subject
+            .to_ascii_lowercase()
+            .starts_with("re:")
+        {
+            original_subject.clone()
+        } else {
+            format!("Re: {original_subject}")
+        };
+
+        // Build References header: original References + original Message-ID
+        let references = match original_references {
+            Some(refs) => format!("{refs} {original_message_id}"),
+            None => original_message_id.clone(),
+        };
+
+        // Determine recipients
+        let smtp_config = self.config.get_smtp_account(&input.account_id)?;
+        let self_email = smtp_config.user.to_ascii_lowercase();
+
+        let to = if input.reply_all {
+            // Reply-all: reply to original From + original To (minus self)
+            let mut recipients = vec![original_from.clone()];
+            for addr in original_to.split(',').map(str::trim) {
+                if !addr.is_empty() && !addr.to_ascii_lowercase().contains(&self_email) {
+                    recipients.push(addr.to_owned());
+                }
+            }
+            recipients
+        } else {
+            vec![original_from.clone()]
+        };
+
+        let cc = if input.reply_all {
+            original_cc
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|a| !a.is_empty() && !a.to_ascii_lowercase().contains(&self_email))
+                .map(String::from)
+                .collect()
+        } else {
+            vec![]
+        };
+
+        let composition = smtp::EmailComposition {
+            from: smtp_config.user.clone(),
+            to: to.clone(),
+            cc,
+            bcc: vec![],
+            subject: reply_subject,
+            body_text: Some(input.body_text),
+            body_html: input.body_html,
+            reply_to: None,
+            in_reply_to: Some(original_message_id),
+            references: Some(references),
+        };
+
+        let sent_message_id = smtp::send_email(
+            smtp_config,
+            self.token_manager.as_deref(),
+            self.config.smtp_timeout_ms,
+            &composition,
+        )
+        .await?;
+
+        if self.config.smtp_save_sent {
+            if let Err(e) = self
+                .save_to_sent_folder(&input.account_id, &composition)
+                .await
+            {
+                warn!(
+                    account_id = input.account_id,
+                    "failed to save reply to IMAP Sent folder: {e}"
+                );
+            }
+        }
+
+        let summary = format!("Reply sent to {}", to.first().unwrap_or(&String::new()));
+        let data = serde_json::json!({
+            "status": "ok",
+            "account_id": input.account_id,
+            "message_id": sent_message_id,
+            "in_reply_to": input.message_id,
+        });
+        Ok((summary, data))
+    }
+
+    async fn smtp_forward_message_impl(
+        &self,
+        input: SmtpForwardMessageInput,
+    ) -> AppResult<(String, serde_json::Value)> {
+        require_smtp_write_enabled(&self.config)?;
+        validate_account_id(&input.account_id)?;
+        validate_email_recipients(&input.to, "to")?;
+
+        // Fetch original message via IMAP
+        let msg_id = MessageId::parse(&input.message_id)?;
+        let account = self.config.get_account(&input.account_id)?;
+        let mut session =
+            imap::connect_authenticated(&self.config, account, self.token_manager.as_deref())
+                .await?;
+        let uidvalidity =
+            imap::select_mailbox_readonly(&self.config, &mut session, &msg_id.mailbox).await?;
+        if uidvalidity != msg_id.uidvalidity {
+            return Err(AppError::Conflict(format!(
+                "UIDVALIDITY mismatch: message_id has {} but mailbox has {}",
+                msg_id.uidvalidity, uidvalidity
+            )));
+        }
+
+        let raw_bytes = imap::fetch_raw_message(&self.config, &mut session, msg_id.uid).await?;
+        let parsed = mailparse::parse_mail(&raw_bytes)
+            .map_err(|e| AppError::Internal(format!("failed to parse original message: {e}")))?;
+
+        let get_header = |name: &str| -> Option<String> {
+            parsed
+                .headers
+                .iter()
+                .find(|h| h.get_key().eq_ignore_ascii_case(name))
+                .map(|h| h.get_value())
+        };
+
+        let original_subject = get_header("Subject").unwrap_or_default();
+        let original_from = get_header("From").unwrap_or_default();
+        let original_date = get_header("Date").unwrap_or_default();
+
+        let fwd_subject = if original_subject
+            .to_ascii_lowercase()
+            .starts_with("fwd:")
+        {
+            original_subject.clone()
+        } else {
+            format!("Fwd: {original_subject}")
+        };
+
+        // Build forward body with original message inline
+        let original_body = mime::extract_body_text(&parsed).unwrap_or_default();
+        let forward_text = format!(
+            "{}\n\n---------- Forwarded message ----------\nFrom: {}\nDate: {}\nSubject: {}\n\n{}",
+            input.body_text.as_deref().unwrap_or(""),
+            original_from,
+            original_date,
+            original_subject,
+            original_body,
+        );
+
+        let smtp_config = self.config.get_smtp_account(&input.account_id)?;
+
+        let composition = smtp::EmailComposition {
+            from: smtp_config.user.clone(),
+            to: input.to.clone(),
+            cc: vec![],
+            bcc: vec![],
+            subject: fwd_subject,
+            body_text: Some(forward_text),
+            body_html: None,
+            reply_to: None,
+            in_reply_to: None,
+            references: None,
+        };
+
+        let sent_message_id = smtp::send_email(
+            smtp_config,
+            self.token_manager.as_deref(),
+            self.config.smtp_timeout_ms,
+            &composition,
+        )
+        .await?;
+
+        if self.config.smtp_save_sent {
+            if let Err(e) = self
+                .save_to_sent_folder(&input.account_id, &composition)
+                .await
+            {
+                warn!(
+                    account_id = input.account_id,
+                    "failed to save forwarded message to IMAP Sent folder: {e}"
+                );
+            }
+        }
+
+        let summary = format!(
+            "Forwarded to {} recipient(s)",
+            input.to.len()
+        );
+        let data = serde_json::json!({
+            "status": "ok",
+            "account_id": input.account_id,
+            "message_id": sent_message_id,
+            "forwarded_from": input.message_id,
+        });
+        Ok((summary, data))
+    }
+
+    async fn smtp_verify_account_impl(
+        &self,
+        input: SmtpVerifyAccountInput,
+    ) -> AppResult<(String, serde_json::Value)> {
+        validate_account_id(&input.account_id)?;
+        let smtp_config = self.config.get_smtp_account(&input.account_id)?;
+
+        smtp::verify_smtp(
+            smtp_config,
+            self.token_manager.as_deref(),
+            self.config.smtp_timeout_ms,
+        )
+        .await?;
+
+        let data = serde_json::json!({
+            "status": "ok",
+            "account_id": input.account_id,
+            "host": smtp_config.host,
+            "port": smtp_config.port,
+            "security": format!("{:?}", smtp_config.security).to_ascii_lowercase(),
+        });
+        Ok(("SMTP connection verified".to_owned(), data))
+    }
+
+    /// Save a sent message to the IMAP Sent folder.
+    ///
+    /// Attempts to detect the correct Sent folder name for the provider.
+    async fn save_to_sent_folder(
+        &self,
+        account_id: &str,
+        composition: &smtp::EmailComposition,
+    ) -> AppResult<()> {
+        let account = self.config.get_account(account_id)?;
+        let mut session =
+            imap::connect_authenticated(&self.config, account, self.token_manager.as_deref())
+                .await?;
+
+        // Detect Sent folder: try common names
+        let mailboxes = imap::list_all_mailboxes(&self.config, &mut session).await?;
+        let sent_folder = mailboxes
+            .iter()
+            .map(|m| m.name().to_owned())
+            .find(|name| {
+                let lower = name.to_ascii_lowercase();
+                lower == "sent"
+                    || lower == "sent items"
+                    || lower.ends_with("/sent")
+                    || lower.ends_with("/sent mail")
+                    || lower.contains("[gmail]/sent")
+            })
+            .unwrap_or_else(|| "Sent".to_owned());
+
+        // Build a minimal RFC822 message for IMAP APPEND
+        let mut rfc822 = format!(
+            "From: {}\r\nTo: {}\r\nSubject: {}\r\nDate: {}\r\n",
+            composition.from,
+            composition.to.join(", "),
+            composition.subject,
+            chrono::Utc::now().to_rfc2822(),
+        );
+        if !composition.cc.is_empty() {
+            rfc822.push_str(&format!("Cc: {}\r\n", composition.cc.join(", ")));
+        }
+        if let Some(ref in_reply_to) = composition.in_reply_to {
+            rfc822.push_str(&format!("In-Reply-To: {in_reply_to}\r\n"));
+        }
+        if let Some(ref references) = composition.references {
+            rfc822.push_str(&format!("References: {references}\r\n"));
+        }
+        rfc822.push_str("\r\n");
+        if let Some(ref body) = composition.body_text {
+            rfc822.push_str(body);
+        }
+
+        imap::append(&self.config, &mut session, &sent_folder, rfc822.as_bytes()).await?;
+        Ok(())
     }
 }
 
@@ -2323,6 +2803,7 @@ fn app_error_code(error: &AppError) -> &'static str {
         AppError::AuthFailed(_) => "auth_failed",
         AppError::Timeout(_) => "timeout",
         AppError::Conflict(_) => "conflict",
+        AppError::TokenRefresh(_) => "token_refresh_failed",
         AppError::Internal(_) => "internal",
     }
 }
@@ -2924,6 +3405,32 @@ fn require_write_enabled(config: &ServerConfig) -> AppResult<()> {
         return Err(AppError::InvalidInput(
             "write tools are disabled; set MAIL_IMAP_WRITE_ENABLED=true".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+/// Guard: SMTP write operations require explicit opt-in
+fn require_smtp_write_enabled(config: &ServerConfig) -> AppResult<()> {
+    if !config.smtp_write_enabled {
+        return Err(AppError::InvalidInput(
+            "SMTP send tools are disabled; set MAIL_SMTP_WRITE_ENABLED=true".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a list of email recipients
+fn validate_email_recipients(addrs: &[String], field: &str) -> AppResult<()> {
+    if addrs.is_empty() {
+        return Err(AppError::invalid(format!("{field} must have at least one recipient")));
+    }
+    if addrs.len() > 50 {
+        return Err(AppError::invalid(format!("{field} must have at most 50 recipients")));
+    }
+    for addr in addrs {
+        if !addr.contains('@') || addr.len() < 3 {
+            return Err(AppError::invalid(format!("invalid email address in {field}: '{addr}'")));
+        }
     }
     Ok(())
 }
