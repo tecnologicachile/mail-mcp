@@ -18,6 +18,7 @@
 
 mod config;
 mod errors;
+mod graph;
 mod imap;
 mod message_id;
 mod mime;

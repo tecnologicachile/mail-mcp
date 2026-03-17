@@ -27,9 +27,10 @@ use crate::models::{
     MailboxStatusInput, MessageDetail, MessageSummary, Meta, MoveMessageInput, RenameMailboxInput,
     SearchAndDeleteInput, SearchAndMoveInput, SearchMessagesInput, SmtpAccountInfo,
     SmtpForwardMessageInput, SmtpReplyMessageInput, SmtpSendMessageInput, SmtpVerifyAccountInput,
-    ToolEnvelope, UpdateMessageFlagsInput,
+    GraphSendMessageInput, ToolEnvelope, UpdateMessageFlagsInput,
 };
 use crate::pagination::{CursorEntry, CursorStore};
+use crate::graph;
 use crate::smtp;
 
 /// Maximum messages per search result page
@@ -597,6 +598,22 @@ impl MailImapServer {
         let started = Instant::now();
         let result = self.smtp_verify_account_impl(input).await;
         finalize_tool(started, "smtp_verify_account", result)
+    }
+
+    // ─── Microsoft Graph Tools ───────────────────────────────────────────────
+
+    /// Tool: Send email via Microsoft Graph API
+    #[tool(
+        name = "graph_send_message",
+        description = "Send email via Microsoft Graph API (required for personal hotmail/outlook.com accounts where SMTP is blocked)"
+    )]
+    async fn graph_send_message(
+        &self,
+        Parameters(input): Parameters<GraphSendMessageInput>,
+    ) -> Result<Json<ToolEnvelope<serde_json::Value>>, ErrorData> {
+        let started = Instant::now();
+        let result = self.graph_send_message_impl(input).await;
+        finalize_tool(started, "graph_send_message", result)
     }
 }
 
@@ -2733,6 +2750,64 @@ impl MailImapServer {
             "security": format!("{:?}", smtp_config.security).to_ascii_lowercase(),
         });
         Ok(("SMTP connection verified".to_owned(), data))
+    }
+
+    // ─── Microsoft Graph impl methods ──────────────────────────────────────
+
+    async fn graph_send_message_impl(
+        &self,
+        input: GraphSendMessageInput,
+    ) -> AppResult<(String, serde_json::Value)> {
+        validate_account_id(&input.account_id)?;
+        validate_email_recipients(&input.to, "to")?;
+        if !input.cc.is_empty() {
+            validate_email_recipients(&input.cc, "cc")?;
+        }
+        if !input.bcc.is_empty() {
+            validate_email_recipients(&input.bcc, "bcc")?;
+        }
+        if input.subject.is_empty() || input.subject.len() > 998 {
+            return Err(AppError::invalid("subject must be 1..998 characters"));
+        }
+        if input.body_text.is_none() && input.body_html.is_none() {
+            return Err(AppError::invalid(
+                "at least one of body_text or body_html is required",
+            ));
+        }
+
+        let tm = self.token_manager.as_ref().ok_or_else(|| {
+            AppError::InvalidInput(format!(
+                "account '{}' requires OAuth2 for Graph API but no OAuth2 is configured. \
+                 Set MAIL_OAUTH2_{}_PROVIDER=microsoft with Mail.Send scope.",
+                input.account_id,
+                input.account_id.to_ascii_uppercase()
+            ))
+        })?;
+
+        let params = graph::GraphEmailParams {
+            to: input.to.clone(),
+            cc: input.cc.clone(),
+            bcc: input.bcc.clone(),
+            subject: input.subject.clone(),
+            body_text: input.body_text,
+            body_html: input.body_html,
+            reply_to: input.reply_to,
+            in_reply_to: input.in_reply_to,
+            references: input.references,
+            save_to_sent: input.save_to_sent,
+        };
+
+        graph::send_email(tm, &input.account_id, &params).await?;
+
+        let recipient_count = input.to.len() + input.cc.len() + input.bcc.len();
+        let summary = format!("Email sent via Graph API to {recipient_count} recipient(s)");
+        let data = serde_json::json!({
+            "status": "ok",
+            "account_id": input.account_id,
+            "recipients_count": recipient_count,
+            "method": "microsoft_graph",
+        });
+        Ok((summary, data))
     }
 
     /// Save a sent message to the IMAP Sent folder.

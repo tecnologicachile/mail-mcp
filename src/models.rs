@@ -617,6 +617,43 @@ pub struct SmtpAccountInfo {
     pub security: String,
 }
 
+// ─── Microsoft Graph input models ────────────────────────────────────────────
+
+/// Input: send an email via Microsoft Graph API
+///
+/// Uses `POST /me/sendMail` instead of SMTP. Required for personal
+/// Microsoft accounts (hotmail/outlook.com) where SMTP AUTH is disabled.
+/// Requires OAuth2 with `Mail.Send` scope.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct GraphSendMessageInput {
+    /// Account identifier (defaults to `"default"`)
+    #[serde(default = "default_account_id")]
+    pub account_id: String,
+    /// Recipient email addresses (1..50)
+    pub to: Vec<String>,
+    /// CC recipients (optional, max 50)
+    #[serde(default)]
+    pub cc: Vec<String>,
+    /// BCC recipients (optional, max 50)
+    #[serde(default)]
+    pub bcc: Vec<String>,
+    /// Email subject (1..998 characters)
+    pub subject: String,
+    /// Plain text body (at least one of body_text or body_html required)
+    pub body_text: Option<String>,
+    /// HTML body (at least one of body_text or body_html required)
+    pub body_html: Option<String>,
+    /// Reply-To address (optional)
+    pub reply_to: Option<String>,
+    /// In-Reply-To message ID for threading (optional)
+    pub in_reply_to: Option<String>,
+    /// References header for threading (optional)
+    pub references: Option<String>,
+    /// Save to Sent Items folder (default: true)
+    #[serde(default = "default_true")]
+    pub save_to_sent: bool,
+}
+
 /// Mailbox status information
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MailboxStatusInfo {
