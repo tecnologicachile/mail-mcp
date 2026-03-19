@@ -594,6 +594,12 @@ pub struct SmtpReplyMessageInput {
     /// Reply to all recipients (default: false, reply to sender only)
     #[serde(default)]
     pub reply_all: bool,
+    /// Include original email's attachments in the reply (default: false)
+    #[serde(default)]
+    pub include_original_attachments: bool,
+    /// Additional file attachments (optional, base64-encoded)
+    #[serde(default)]
+    pub attachments: Vec<AttachmentInput>,
 }
 
 /// Input: forward an existing message via SMTP

@@ -2623,6 +2623,14 @@ impl MailImapServer {
             vec![]
         };
 
+        // Collect attachments: original email's + any new ones
+        let mut attachments = decode_attachments(&input.attachments)?;
+        if input.include_original_attachments {
+            let original_attachments =
+                extract_attachments_from_message(&parsed);
+            attachments.extend(original_attachments);
+        }
+
         let composition = smtp::EmailComposition {
             from: smtp_config.user.clone(),
             to: to.clone(),
@@ -2634,7 +2642,7 @@ impl MailImapServer {
             reply_to: None,
             in_reply_to: Some(original_message_id),
             references: Some(references),
-            attachments: vec![],
+            attachments,
         };
 
         let sent_message_id = smtp::send_email(
@@ -3562,6 +3570,51 @@ fn require_write_enabled(config: &ServerConfig) -> AppResult<()> {
 }
 
 /// Guard: SMTP write operations require explicit opt-in
+/// Extract attachments from a parsed email message for re-attaching in replies/forwards
+fn extract_attachments_from_message(parsed: &mailparse::ParsedMail<'_>) -> Vec<smtp::EmailAttachment> {
+    let mut attachments = Vec::new();
+    extract_attachments_recursive(parsed, &mut attachments);
+    attachments
+}
+
+fn extract_attachments_recursive(
+    part: &mailparse::ParsedMail<'_>,
+    attachments: &mut Vec<smtp::EmailAttachment>,
+) {
+    let ct = &part.ctype;
+    let is_attachment = part
+        .get_content_disposition()
+        .disposition
+        == mailparse::DispositionType::Attachment
+        || ct.params.get("name").is_some();
+    let is_text_body = ct.mimetype.starts_with("text/") && !is_attachment;
+    let is_multipart = ct.mimetype.starts_with("multipart/");
+
+    if !is_text_body && !is_multipart && is_attachment {
+        let filename = ct
+            .params
+            .get("name")
+            .cloned()
+            .or_else(|| {
+                let disp = part.get_content_disposition();
+                disp.params.get("filename").cloned()
+            })
+            .unwrap_or_else(|| "attachment".to_owned());
+
+        if let Ok(body) = part.get_body_raw() {
+            attachments.push(smtp::EmailAttachment {
+                filename,
+                content_type: ct.mimetype.clone(),
+                content: body,
+            });
+        }
+    }
+
+    for sub in &part.subparts {
+        extract_attachments_recursive(sub, attachments);
+    }
+}
+
 /// Decode base64 attachment inputs into raw bytes for SMTP
 fn decode_attachments(inputs: &[AttachmentInput]) -> AppResult<Vec<smtp::EmailAttachment>> {
     use base64::Engine;
