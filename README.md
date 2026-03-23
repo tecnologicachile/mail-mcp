@@ -121,7 +121,7 @@ Microsoft blocks SMTP on personal accounts. Use Graph API instead:
 
 Get your token in 1 minute with device code flow. See [Account Setup Guide](docs/account-setup.md).
 
-## 30 MCP Tools
+## 31 MCP Tools
 
 ### Read (7 tools)
 
