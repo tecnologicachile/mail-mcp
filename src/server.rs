@@ -103,13 +103,92 @@ impl MailImapServer {
         }
     }
 
-    /// Tool: List configured IMAP accounts
+    /// Tool: List all configured accounts with their capabilities
     ///
-    /// Returns account metadata (host, port, secure) without exposing
-    /// credentials.
+    /// Shows which protocols are available per account (IMAP, SMTP, Graph API, EWS)
+    /// so the LLM knows which send/read tool to use for each account.
+    #[tool(
+        name = "list_all_accounts",
+        description = "List all configured email accounts with their capabilities (IMAP, SMTP, Graph API, EWS). Use this to know which send/read tools to use per account."
+    )]
+    async fn list_all_accounts(&self) -> Result<Json<ToolEnvelope<serde_json::Value>>, ErrorData> {
+        let started = Instant::now();
+
+        // Collect all unique account IDs from all config sources
+        let mut all_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for id in self.config.accounts.keys() {
+            all_ids.insert(id.clone());
+        }
+        for id in self.config.smtp_accounts.keys() {
+            all_ids.insert(id.clone());
+        }
+        for id in self.config.graph_oauth2_accounts.keys() {
+            all_ids.insert(id.clone());
+        }
+        for id in self.config.ews_accounts.keys() {
+            all_ids.insert(id.clone());
+        }
+
+        let accounts: Vec<serde_json::Value> = all_ids
+            .iter()
+            .map(|id| {
+                let imap = self.config.accounts.get(id);
+                let has_smtp = self.config.smtp_accounts.contains_key(id);
+                let has_graph = self.config.graph_oauth2_accounts.contains_key(id)
+                    || self.token_manager.as_ref().is_some_and(|tm| tm.has_oauth2(id))
+                        && self.graph_token_manager.as_ref().is_some_and(|tm| tm.has_oauth2(id));
+                let has_ews = self.config.ews_accounts.contains_key(id);
+
+                let user = imap
+                    .map(|a| a.user.clone())
+                    .or_else(|| self.config.smtp_accounts.get(id).map(|a| a.user.clone()))
+                    .or_else(|| self.config.ews_accounts.get(id).map(|a| a.user.clone()))
+                    .unwrap_or_default();
+
+                let mut send_methods = Vec::new();
+                if has_smtp {
+                    send_methods.push("smtp_send_message");
+                }
+                if has_graph {
+                    send_methods.push("graph_send_message");
+                }
+                if has_ews {
+                    send_methods.push("ews_send_message");
+                }
+
+                let mut read_methods = Vec::new();
+                if imap.is_some() {
+                    read_methods.push("imap_search_messages");
+                }
+                if has_ews {
+                    read_methods.push("ews_search_messages");
+                }
+
+                serde_json::json!({
+                    "account_id": id,
+                    "user": user,
+                    "imap": imap.is_some(),
+                    "smtp": has_smtp,
+                    "graph_api": has_graph,
+                    "ews": has_ews,
+                    "send_with": send_methods,
+                    "read_with": read_methods,
+                })
+            })
+            .collect();
+
+        let data = serde_json::json!({ "accounts": accounts });
+        finalize_tool(
+            started,
+            "list_all_accounts",
+            Ok((format!("{} account(s) configured", accounts.len()), data)),
+        )
+    }
+
+    /// Tool: List configured IMAP accounts (legacy, use list_all_accounts instead)
     #[tool(
         name = "imap_list_accounts",
-        description = "List configured IMAP accounts"
+        description = "List configured IMAP accounts (use list_all_accounts for full capabilities view)"
     )]
     async fn list_accounts(&self) -> Result<Json<ToolEnvelope<serde_json::Value>>, ErrorData> {
         let started = Instant::now();
@@ -124,24 +203,11 @@ impl MailImapServer {
                 secure: a.secure,
             })
             .collect::<Vec<_>>();
-        let next_account_id = accounts
-            .first()
-            .map(|a| a.account_id.clone())
-            .unwrap_or_else(|| "default".to_owned());
-        let data = serde_json::json!({
-            "accounts": accounts,
-            "next_action": next_action_list_mailboxes(&next_account_id),
-        });
+        let data = serde_json::json!({ "accounts": accounts });
         finalize_tool(
             started,
             "imap_list_accounts",
-            Ok((
-                format!(
-                    "{} account(s) configured",
-                    self.config.accounts.values().len()
-                ),
-                data,
-            )),
+            Ok((format!("{} IMAP account(s)", accounts.len()), data)),
         )
     }
 
