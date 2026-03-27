@@ -1,0 +1,25 @@
+services:
+  mail-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mail-mcp:latest
+    container_name: mail-mcp
+    restart: unless-stopped
+    # The MCP server communicates via stdio.
+    # To use it with docker-compose, you typically run it in a way that
+    # allows attaching to its stdin/stdout.
+    stdin_open: true
+    tty: true
+    env_file:
+      - .env
+    # Example environment variables (overrides .env if provided)
+    environment:
+      - RUST_LOG=info
+      # - MAIL_IMAP_DEFAULT_HOST=imap.example.com
+      # - MAIL_IMAP_DEFAULT_USER=user@example.com
+      # - MAIL_IMAP_DEFAULT_PASS=password
+      # - MAIL_IMAP_WRITE_ENABLED=false
+    # Note: Since this is an MCP server, it's usually run by an MCP client.
+    # If running manually via docker-compose for testing:
+    # docker-compose run --rm mail-mcp
