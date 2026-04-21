@@ -9,11 +9,23 @@ cargo-dist-version = "0.31.0"
 ci = "github"
 # The installers to generate for each app
 installers = ["shell", "powershell", "npm"]
-# The publishers to run in CI
-publish-jobs = ["npm"]
-# npm package scope/name for generated installer package
-npm-scope = "@bradsjm"
-npm-package = "mail-imap-mcp-rs"
+# The publishers to run in CI.
+#
+# We generate the npm tarball (so `installers = [...]` above keeps "npm")
+# and attach it to the GitHub Release, but we DO NOT publish it to the
+# public npm registry from this CI. Reason: the fork inherited
+# `@bradsjm/mail-imap-mcp-rs` which this organization does not control,
+# so the publish HTTP call 404s on every release. If the team wants to
+# distribute via npm in the future, (1) create an npm org named
+# `@tecnologicachile` (or pick another scope), (2) configure Trusted
+# Publishing on npmjs.com pointing at this repo, and (3) re-add "npm" to
+# `publish-jobs`.
+publish-jobs = []
+# npm package scope/name for the generated installer tarball attached to
+# each Release. Bumped from the upstream fork's scope so the generated
+# package name matches this repository.
+npm-scope = "@tecnologicachile"
+npm-package = "mail-mcp"
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # This repo intentionally customizes generated CI for npm trusted publishing.

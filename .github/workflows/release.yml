@@ -19,6 +19,15 @@ permissions:
   "id-token": "write"
 
 on:
+  # Fire automatically when a vX.Y.Z tag is pushed — the canonical release
+  # trigger. The job reads the concrete version from Cargo.toml (see `plan`
+  # step below) and enforces that it matches the tag, so ad-hoc tags like
+  # `v0.0.0-test` on a mismatched Cargo.toml version will fail fast.
+  push:
+    tags:
+      - "v*"
+  # Retain manual dispatch as an escape hatch (e.g. re-run a failed release
+  # without cutting a new tag).
   workflow_dispatch:
 
 jobs:
@@ -279,41 +288,25 @@ jobs:
 
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
-  publish-npm:
-    needs:
-      - plan
-      - host
-    runs-on: "ubuntu-22.04"
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      PLAN: ${{ needs.plan.outputs.val }}
-    if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
-    steps:
-      - name: Fetch npm packages
-        uses: actions/download-artifact@v7
-        with:
-          pattern: artifacts-*
-          path: npm/
-          merge-multiple: true
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-          registry-url: "https://registry.npmjs.org"
-      - run: |
-          for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith("-npm-package.tar.gz")] | any)'); do
-            pkg=$(echo "$release" | jq '.artifacts[] | select(endswith("-npm-package.tar.gz"))' --raw-output)
-            npm publish --access public --provenance "./npm/${pkg}"
-          done
+  # NOTE: publish-npm job intentionally removed in v0.4.2.
+  # The upstream fork configured `@bradsjm/mail-imap-mcp-rs` as the npm
+  # package name; this organization does not own that scope, so every
+  # release of this fork's CI was 404-ing on `npm publish`. The npm
+  # tarball is still generated and attached to each GitHub Release
+  # (see `installers = ["shell", "powershell", "npm"]` in
+  # dist-workspace.toml) — it just isn't pushed to the public registry.
+  # To re-enable: create an npm org, set `publish-jobs = ["npm"]` in
+  # dist-workspace.toml, and run `dist generate --allow-dirty` to
+  # restore this job automatically.
 
   announce:
     needs:
       - plan
       - host
-      - publish-npm
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' && (needs.publish-npm.result == 'skipped' || needs.publish-npm.result == 'success') }}
+    if: ${{ always() && needs.host.result == 'success' }}
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

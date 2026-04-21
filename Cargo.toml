@@ -1,6 +1,6 @@
 [package]
 name = "mail-mcp"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 license = "MIT"
 description = "Secure IMAP MCP server over stdio with cursor-based pagination, multi-account support, and TLS-only connections"

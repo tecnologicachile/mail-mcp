@@ -15,6 +15,22 @@
 
 Most email MCP servers only do IMAP reads. This one does **everything**: read, search, send, reply, forward, bulk operations, Microsoft Graph API, and Exchange Web Services — with real OAuth2, multi-account, and multi-provider support. Written in Rust for speed and safety.
 
+## What's New in v0.4.2
+
+- **Release pipeline fixed**: the `publish-npm` job in the CI release
+  workflow has been disabled. It was inherited from the upstream fork and
+  tried to publish to `@bradsjm/mail-imap-mcp-rs`, a scope this org does
+  not own — every release was 404-ing on that step. See "Releasing" below
+  for the full explanation and how to re-enable npm publishing if needed.
+- **Auto-trigger releases on tag push**: `.github/workflows/release.yml`
+  now fires on `push: tags: ['v*']`, so tagging `vX.Y.Z` and pushing is
+  all it takes to cut a release. `workflow_dispatch` is retained as a
+  manual escape hatch.
+- **Cleanup**: removed the dangling `init-npm-placeholder.yml` workflow
+  (also referenced the fork's npm scope).
+- **docs**: README gains a "Releasing" section documenting the new flow
+  and the npm decision.
+
 ## What's New in v0.4.1
 
 - **Fix**: `save_to_sent_folder` now archives the exact RFC822 bytes that were
@@ -401,6 +417,36 @@ cargo clippy --all-targets -- -D warnings  # linting
 ```
 
 See `AGENTS.md` for contributor guidelines.
+
+## Releasing
+
+Releases are automated via [`cargo-dist`](https://github.com/axodotdev/cargo-dist). To ship a new version:
+
+1. Bump `version = "X.Y.Z"` in `Cargo.toml` (the release workflow enforces
+   that this matches the pushed tag).
+2. Commit the bump + any release notes to `main`.
+3. Tag and push:
+   ```bash
+   git tag vX.Y.Z
+   git push origin main --tags
+   ```
+4. The `push: tags: ['v*']` trigger in `.github/workflows/release.yml`
+   compiles binaries for Linux / macOS (Intel + Apple Silicon) / Windows,
+   generates installer scripts (`.sh`, `.ps1`), creates the GitHub Release,
+   and attaches all artifacts with SHA256 checksums.
+5. If anything fails you can re-run the workflow manually from the Actions
+   tab (the `workflow_dispatch` trigger is preserved as an escape hatch).
+
+**npm publishing is intentionally disabled.** The upstream fork was
+configured to publish as `@bradsjm/mail-imap-mcp-rs`, a scope this
+organization does not own, which caused every release to 404 on `npm
+publish`. The npm tarball is still generated and attached to each GitHub
+Release so users can install via `npm install ./mail-mcp-npm-package.tar.gz`
+manually. To enable npm registry publishing for this fork: create an npm
+org (e.g. `@tecnologicachile`), configure Trusted Publishing on
+npmjs.com pointing at this repo, set `publish-jobs = ["npm"]` in
+`dist-workspace.toml`, and run `dist generate --allow-dirty` to restore
+the `publish-npm` job in `release.yml`.
 
 ## Contributing
 
