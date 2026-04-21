@@ -99,10 +99,25 @@ pub struct EmailComposition {
 
 // ─── Send email ──────────────────────────────────────────────────────────────
 
+/// Result of a successful SMTP send.
+///
+/// `rfc822` contains the exact bytes that went over the wire — suitable for
+/// `IMAP APPEND` to the Sent folder. This guarantees the archived copy is
+/// byte-identical to what the recipient received (same Message-ID, Date,
+/// MIME structure, boundaries, encoded headers, attachments).
+pub struct SentMessage {
+    pub message_id: String,
+    pub rfc822: Vec<u8>,
+}
+
 /// Send an email via SMTP.
 ///
 /// Builds the MIME message and sends it through the configured SMTP transport.
 /// Supports both password and OAuth2 authentication.
+///
+/// Returns the generated Message-ID plus the full serialized RFC822 bytes so
+/// the caller can archive the exact message that was sent (e.g., via IMAP
+/// APPEND to a Sent folder).
 ///
 /// # Errors
 ///
@@ -116,13 +131,16 @@ pub async fn send_email(
     connect_timeout_ms: u64,
     send_timeout_ms: u64,
     composition: &EmailComposition,
-) -> AppResult<String> {
+) -> AppResult<SentMessage> {
     let message = build_message(composition)?;
     let message_id = message
         .headers()
         .get_raw("Message-ID")
         .unwrap_or_default()
         .to_owned();
+    // Serialize BEFORE sending so we can archive the exact bytes even though
+    // `transport.send(message)` consumes the Message by value.
+    let rfc822 = message.formatted();
 
     let transport = build_transport(smtp_config, token_manager, connect_timeout_ms).await?;
 
@@ -143,7 +161,7 @@ pub async fn send_email(
             })
         })?;
 
-    Ok(message_id)
+    Ok(SentMessage { message_id, rfc822 })
 }
 
 /// Verify SMTP connectivity and authentication.
@@ -409,6 +427,48 @@ mod tests {
     }
 
     #[test]
+    fn formatted_bytes_are_suitable_for_imap_append() {
+        // Regression: previously save_to_sent_folder hand-rolled a minimal
+        // RFC822 that lacked MIME headers, dropped the HTML body and left
+        // non-ASCII headers un-encoded. The fix serializes the real lettre
+        // Message and APPENDs those bytes. This verifies the serialization
+        // is usable.
+        let comp = EmailComposition {
+            from: "sender@example.com".to_owned(),
+            to: vec!["recipient@example.com".to_owned()],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Asunto con acentos — ñ".to_owned(),
+            body_text: Some("Texto plano".to_owned()),
+            body_html: Some("<p>HTML <strong>rich</strong></p>".to_owned()),
+            reply_to: None,
+            in_reply_to: None,
+            references: None,
+            attachments: vec![],
+        };
+        let msg = build_message(&comp).unwrap();
+        let bytes = msg.formatted();
+        let formatted = String::from_utf8_lossy(&bytes);
+
+        assert!(formatted.contains("MIME-Version: 1.0"));
+        assert!(formatted.contains("Content-Type: multipart/alternative"));
+        assert!(formatted.contains("boundary="));
+        // Non-ASCII subject must be MIME-encoded (RFC 2047) so it survives
+        // IMAP/ENVELOPE decoding — otherwise search results show "???".
+        assert!(
+            formatted.contains("=?utf-8?") || formatted.contains("=?UTF-8?"),
+            "subject must be RFC 2047-encoded; got:\n{formatted}"
+        );
+        assert!(!formatted.contains("Subject: Asunto con acentos — ñ"));
+        // Both bodies present.
+        assert!(formatted.contains("Texto plano"));
+        assert!(formatted.contains("<p>HTML <strong>rich</strong></p>"));
+        // Proper multipart closure.
+        assert!(formatted.contains("Content-Type: text/plain"));
+        assert!(formatted.contains("Content-Type: text/html"));
+    }
+
+    #[test]
     fn build_message_with_reply_headers() {
         let comp = EmailComposition {
             from: "sender@example.com".to_owned(),
@@ -446,6 +506,46 @@ mod tests {
             attachments: vec![],
         };
         assert!(build_message(&comp).is_err());
+    }
+
+    /// Helper to generate a real RFC822 blob at /tmp/mail-mcp-sample.eml so
+    /// the bytes can be fed to `imap_append_message` for manual end-to-end
+    /// verification of the Sent-folder MIME fix. Run with:
+    ///   cargo test --release -- --ignored generate_sample_rfc822 --nocapture
+    #[test]
+    #[ignore]
+    fn generate_sample_rfc822_for_append() {
+        let comp = EmailComposition {
+            from: "soporte@tecnologicachile.cl".to_owned(),
+            to: vec!["soporte@tecnologicachile.cl".to_owned()],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Test MIME fix — v0.4.1 (acentos y ñ)".to_owned(),
+            body_text: Some(
+                "Prueba del fix de save_to_sent_folder.\n\n\
+                 Si se ve subject con acentos y cuerpo multipart correcto,\n\
+                 el fix funciona.\n\n\
+                 Lista:\n- Uno\n- Dos"
+                    .to_owned(),
+            ),
+            body_html: Some(
+                "<h3>Prueba del fix</h3>\
+                 <p>Multipart/alternative con <strong>HTML</strong> + texto plano.</p>\
+                 <ul><li>Uno</li><li>Dos</li></ul>"
+                    .to_owned(),
+            ),
+            reply_to: None,
+            in_reply_to: None,
+            references: None,
+            attachments: vec![],
+        };
+        let msg = build_message(&comp).unwrap();
+        let bytes = msg.formatted();
+        std::fs::write("/tmp/mail-mcp-sample.eml", &bytes).unwrap();
+        println!(
+            "wrote /tmp/mail-mcp-sample.eml — {} bytes",
+            bytes.len()
+        );
     }
 
     #[test]

@@ -2706,7 +2706,7 @@ impl MailImapServer {
             attachments,
         };
 
-        let message_id = smtp::send_email(
+        let sent = smtp::send_email(
             smtp_config,
             self.token_manager.as_deref(),
             self.config.smtp_connect_timeout_ms,
@@ -2718,7 +2718,7 @@ impl MailImapServer {
         // Optionally save to Sent folder via IMAP
         if self.config.smtp_save_sent {
             if let Err(e) = self
-                .save_to_sent_folder(&input.account_id, &composition)
+                .save_to_sent_folder(&input.account_id, &sent.rfc822)
                 .await
             {
                 warn!(
@@ -2733,7 +2733,7 @@ impl MailImapServer {
         let data = serde_json::json!({
             "status": "ok",
             "account_id": input.account_id,
-            "message_id": message_id,
+            "message_id": sent.message_id,
             "recipients_count": recipient_count,
         });
         Ok((summary, data))
@@ -2848,7 +2848,7 @@ impl MailImapServer {
             attachments,
         };
 
-        let sent_message_id = smtp::send_email(
+        let sent = smtp::send_email(
             smtp_config,
             self.token_manager.as_deref(),
             self.config.smtp_connect_timeout_ms,
@@ -2859,7 +2859,7 @@ impl MailImapServer {
 
         if self.config.smtp_save_sent {
             if let Err(e) = self
-                .save_to_sent_folder(&input.account_id, &composition)
+                .save_to_sent_folder(&input.account_id, &sent.rfc822)
                 .await
             {
                 warn!(
@@ -2873,7 +2873,7 @@ impl MailImapServer {
         let data = serde_json::json!({
             "status": "ok",
             "account_id": input.account_id,
-            "message_id": sent_message_id,
+            "message_id": sent.message_id,
             "in_reply_to": input.message_id,
         });
         Ok((summary, data))
@@ -2947,14 +2947,14 @@ impl MailImapServer {
             bcc: vec![],
             subject: fwd_subject,
             body_text: Some(forward_text),
-            body_html: None,
+            body_html: input.body_html,
             reply_to: None,
             in_reply_to: None,
             references: None,
             attachments: vec![],
         };
 
-        let sent_message_id = smtp::send_email(
+        let sent = smtp::send_email(
             smtp_config,
             self.token_manager.as_deref(),
             self.config.smtp_connect_timeout_ms,
@@ -2965,7 +2965,7 @@ impl MailImapServer {
 
         if self.config.smtp_save_sent {
             if let Err(e) = self
-                .save_to_sent_folder(&input.account_id, &composition)
+                .save_to_sent_folder(&input.account_id, &sent.rfc822)
                 .await
             {
                 warn!(
@@ -2982,7 +2982,7 @@ impl MailImapServer {
         let data = serde_json::json!({
             "status": "ok",
             "account_id": input.account_id,
-            "message_id": sent_message_id,
+            "message_id": sent.message_id,
             "forwarded_from": input.message_id,
         });
         Ok((summary, data))
@@ -3095,56 +3095,72 @@ impl MailImapServer {
     /// Save a sent message to the IMAP Sent folder.
     ///
     /// Attempts to detect the correct Sent folder name for the provider.
-    async fn save_to_sent_folder(
-        &self,
-        account_id: &str,
-        composition: &smtp::EmailComposition,
-    ) -> AppResult<()> {
+    /// Archive the exact RFC822 bytes that SMTP just sent to the recipient's
+    /// server into the account's Sent folder via IMAP APPEND.
+    ///
+    /// `rfc822` must be the complete, already-serialized message (headers +
+    /// MIME parts + boundaries). The caller should pass `SentMessage.rfc822`
+    /// returned by `smtp::send_email` — that guarantees the archived copy is
+    /// byte-identical to what the recipient received.
+    ///
+    /// Folder detection covers common English names plus common localized
+    /// variants (Spanish "Enviado[s]", "Elementos enviados"; Portuguese
+    /// "Enviadas", "Itens enviados"; French "Envoyés"; Gmail's
+    /// `[Gmail]/Sent Mail`; Exchange's "Sent Items"). Falls back to the
+    /// literal `"Sent"` mailbox name when nothing matches.
+    async fn save_to_sent_folder(&self, account_id: &str, rfc822: &[u8]) -> AppResult<()> {
         let account = self.config.get_account(account_id)?;
         let mut session =
             imap::connect_authenticated(&self.config, account, self.token_manager.as_deref())
                 .await?;
 
-        // Detect Sent folder: try common names
         let mailboxes = imap::list_all_mailboxes(&self.config, &mut session).await?;
         let sent_folder = mailboxes
             .iter()
             .map(|m| m.name().to_owned())
-            .find(|name| {
-                let lower = name.to_ascii_lowercase();
-                lower == "sent"
-                    || lower == "sent items"
-                    || lower.ends_with("/sent")
-                    || lower.ends_with("/sent mail")
-                    || lower.contains("[gmail]/sent")
-            })
+            .find(|name| is_sent_folder_name(name))
             .unwrap_or_else(|| "Sent".to_owned());
 
-        // Build a minimal RFC822 message for IMAP APPEND
-        let mut rfc822 = format!(
-            "From: {}\r\nTo: {}\r\nSubject: {}\r\nDate: {}\r\n",
-            composition.from,
-            composition.to.join(", "),
-            composition.subject,
-            chrono::Utc::now().to_rfc2822(),
-        );
-        if !composition.cc.is_empty() {
-            rfc822.push_str(&format!("Cc: {}\r\n", composition.cc.join(", ")));
-        }
-        if let Some(ref in_reply_to) = composition.in_reply_to {
-            rfc822.push_str(&format!("In-Reply-To: {in_reply_to}\r\n"));
-        }
-        if let Some(ref references) = composition.references {
-            rfc822.push_str(&format!("References: {references}\r\n"));
-        }
-        rfc822.push_str("\r\n");
-        if let Some(ref body) = composition.body_text {
-            rfc822.push_str(body);
-        }
-
-        imap::append(&self.config, &mut session, &sent_folder, rfc822.as_bytes()).await?;
+        imap::append(&self.config, &mut session, &sent_folder, rfc822).await?;
         Ok(())
     }
+}
+
+/// Return `true` if `name` looks like a Sent folder on any major provider,
+/// including common non-English names. Case-insensitive.
+fn is_sent_folder_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    // Fast path: exact matches for common top-level names (English + localized)
+    matches!(
+        lower.as_str(),
+        "sent"
+            | "sent items"
+            | "sent mail"
+            | "sent messages"
+            | "enviado"
+            | "enviados"
+            | "enviadas"
+            | "elementos enviados"
+            | "correo enviado"
+            | "itens enviados"
+            | "mensagens enviadas"
+            | "envoyés"
+            | "éléments envoyés"
+            | "gesendet"
+            | "gesendete elemente"
+            | "posta inviata"
+            | "inviati"
+            | "verzonden"
+            | "wyslane"
+            | "wysłane"
+    ) || lower.ends_with("/sent")
+        || lower.ends_with("/sent items")
+        || lower.ends_with("/sent mail")
+        || lower.ends_with("/sent messages")
+        || lower.ends_with("/enviado")
+        || lower.ends_with("/enviados")
+        || lower.ends_with("/elementos enviados")
+        || lower.contains("[gmail]/sent")
 }
 
 /// Calculate elapsed milliseconds
@@ -4037,9 +4053,41 @@ fn parse_bulk_message_ids(account_id: &str, message_ids: &[String]) -> AppResult
 /// Tests for server-side validation and encoding helpers.
 mod tests {
     use super::{
-        encode_raw_source_base64, escape_imap_quoted, validate_flag, validate_mailbox,
-        validate_search_text,
+        encode_raw_source_base64, escape_imap_quoted, is_sent_folder_name, validate_flag,
+        validate_mailbox, validate_search_text,
     };
+
+    #[test]
+    fn sent_folder_detection_covers_common_providers() {
+        // Gmail
+        assert!(is_sent_folder_name("[Gmail]/Sent Mail"));
+        // Exchange/Outlook
+        assert!(is_sent_folder_name("Sent Items"));
+        assert!(is_sent_folder_name("Sent"));
+        // Zoho/others in Spanish (this is what the reported bug hit)
+        assert!(is_sent_folder_name("Enviado"));
+        assert!(is_sent_folder_name("Enviados"));
+        assert!(is_sent_folder_name("Elementos enviados"));
+        // Portuguese
+        assert!(is_sent_folder_name("Enviadas"));
+        assert!(is_sent_folder_name("Itens enviados"));
+        // Case-insensitive
+        assert!(is_sent_folder_name("ENVIADO"));
+        assert!(is_sent_folder_name("sent"));
+        // Nested paths
+        assert!(is_sent_folder_name("Archive/Sent"));
+        assert!(is_sent_folder_name("Work/Enviado"));
+    }
+
+    #[test]
+    fn sent_folder_detection_rejects_unrelated_names() {
+        assert!(!is_sent_folder_name("INBOX"));
+        assert!(!is_sent_folder_name("Drafts"));
+        assert!(!is_sent_folder_name("Papelera"));
+        assert!(!is_sent_folder_name("Borrador"));
+        assert!(!is_sent_folder_name("Archive"));
+        assert!(!is_sent_folder_name(""));
+    }
 
     /// Tests that control characters in search text are rejected.
     #[test]

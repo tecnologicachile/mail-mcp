@@ -28,7 +28,7 @@ Most email MCP servers only do IMAP reads. This one does **everything**: read, s
 | Multi-account | Yes | Single account |
 | Microsoft 365 + Hotmail | Both work | Usually neither |
 | Language | Rust (fast, safe) | TypeScript/Python |
-| Tests | 47 unit + integration | Mocks only |
+| Tests | 50 unit + integration | Mocks only |
 
 ## Feature Matrix
 

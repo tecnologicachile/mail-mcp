@@ -620,8 +620,14 @@ pub struct SmtpForwardMessageInput {
     pub message_id: String,
     /// Forward recipients (1..50)
     pub to: Vec<String>,
-    /// Optional cover note (plain text)
+    /// Optional cover note (plain text). The original message is appended
+    /// below as a quoted block.
     pub body_text: Option<String>,
+    /// Optional cover note (HTML). Unlike `body_text`, this is sent as-is
+    /// — the original message is NOT auto-quoted into the HTML part. If you
+    /// need an HTML forward with the original embedded, compose it yourself
+    /// and use `smtp_send_message`.
+    pub body_html: Option<String>,
 }
 
 /// Input: verify SMTP account connectivity
