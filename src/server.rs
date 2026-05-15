@@ -771,6 +771,12 @@ impl MailImapServer {
             if input.subject.is_empty() || input.subject.len() > 998 {
                 return Err(AppError::invalid("subject must be 1..998 characters"));
             }
+            if let Some(t) = input.body_text.as_deref() {
+                validate_email_no_wrapper_leak("body_text", t)?;
+            }
+            if let Some(h) = input.body_html.as_deref() {
+                validate_email_no_wrapper_leak("body_html", h)?;
+            }
             let tm = self
                 .ews_token_manager
                 .as_ref()
@@ -916,8 +922,10 @@ impl ServerHandler for MailImapServer {
                 "them into a single string. NEVER wrap content in pseudo-tags like ",
                 "<body_text>, </body_text>, <body_html>, </body_html>. NEVER include ",
                 "tool-call wrapper syntax (<invoke>, <parameter>, <function_calls>) inside ",
-                "any email field. Concatenated content appears verbatim in the recipient's ",
-                "inbox as garbled text AND trips safety filters when later sessions read it.\n\n",
+                "any email field. The server ENFORCES this: send tools will REJECT any call ",
+                "where body_text or body_html contains these markers (case-insensitive). The ",
+                "rejection is hard — no fallback, no retry-with-cleanup. Compose the two ",
+                "fields cleanly the first time.\n\n",
                 "HARD RULE #2 — when previewing for the user, render ONE clean version of ",
                 "the body (markdown bullets, bold, links as text + URL) and state that the ",
                 "email will be sent multipart. Do NOT paste raw HTML source into the preview. ",
@@ -2821,6 +2829,12 @@ impl MailImapServer {
                 "at least one of body_text or body_html is required",
             ));
         }
+        if let Some(t) = input.body_text.as_deref() {
+            validate_email_no_wrapper_leak("body_text", t)?;
+        }
+        if let Some(h) = input.body_html.as_deref() {
+            validate_email_no_wrapper_leak("body_html", h)?;
+        }
 
         let smtp_config = self.config.get_smtp_account(&input.account_id)?;
         let attachments = decode_attachments(&input.attachments)?;
@@ -2878,6 +2892,10 @@ impl MailImapServer {
     ) -> AppResult<(String, serde_json::Value)> {
         require_smtp_write_enabled(&self.config)?;
         validate_account_id(&input.account_id)?;
+        validate_email_no_wrapper_leak("body_text", &input.body_text)?;
+        if let Some(h) = input.body_html.as_deref() {
+            validate_email_no_wrapper_leak("body_html", h)?;
+        }
 
         // Fetch original message headers via IMAP
         let msg_id = MessageId::parse(&input.message_id)?;
@@ -3015,6 +3033,12 @@ impl MailImapServer {
         require_smtp_write_enabled(&self.config)?;
         validate_account_id(&input.account_id)?;
         validate_email_recipients(&input.to, "to")?;
+        if let Some(t) = input.body_text.as_deref() {
+            validate_email_no_wrapper_leak("body_text", t)?;
+        }
+        if let Some(h) = input.body_html.as_deref() {
+            validate_email_no_wrapper_leak("body_html", h)?;
+        }
 
         // Fetch original message via IMAP
         let msg_id = MessageId::parse(&input.message_id)?;
@@ -3156,6 +3180,12 @@ impl MailImapServer {
             return Err(AppError::invalid(
                 "at least one of body_text or body_html is required",
             ));
+        }
+        if let Some(t) = input.body_text.as_deref() {
+            validate_email_no_wrapper_leak("body_text", t)?;
+        }
+        if let Some(h) = input.body_html.as_deref() {
+            validate_email_no_wrapper_leak("body_html", h)?;
         }
 
         // Prefer Graph-specific token manager (MAIL_GRAPH_*), fall back to
@@ -4108,6 +4138,48 @@ fn validate_email_recipients(addrs: &[String], field: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Reject email fields that contain tool-call wrapper syntax or pseudo-tags
+/// for body_text / body_html. This is the hard server-side enforcement of the
+/// HARD RULES in the MCP server instructions: prompt-based hardening alone
+/// repeatedly failed to stop LLMs from concatenating body_text and body_html
+/// into one field with literal `</body_text><parameter name="body_html">`
+/// markup leaking into the recipient's inbox.
+///
+/// The forbidden markers below have no legitimate use in human correspondence
+/// — an LLM emitting them is leaking its own tool-call frame, not composing
+/// content the user asked for.
+fn validate_email_no_wrapper_leak(field: &str, value: &str) -> AppResult<()> {
+    // Case-insensitive substring search. We keep the list tight to avoid
+    // rejecting legitimate technical content (e.g. someone discussing XML
+    // schemas) — every marker here is either a closing pseudo-tag for the
+    // body fields themselves or unambiguous tool-call wrapper syntax.
+    const FORBIDDEN: &[&str] = &[
+        "</body_text>",
+        "<body_text>",
+        "</body_html>",
+        "<body_html>",
+        "<function_calls>",
+        "</function_calls>",
+        "<invoke name=",
+        "</invoke>",
+        "<parameter name=\"body_",
+        "<parameter name='body_",
+    ];
+    let lower = value.to_ascii_lowercase();
+    for marker in FORBIDDEN {
+        if lower.contains(marker) {
+            return Err(AppError::invalid(format!(
+                "{field} contains tool-call wrapper syntax ('{marker}'). \
+                 body_text and body_html are SEPARATE JSON fields — pass them as \
+                 two distinct parameters and never wrap content in pseudo-tags \
+                 like <body_text>...</body_text> or <parameter name=\"body_html\">. \
+                 See the mail-mcp server instructions (HARD RULE #1)."
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Build message URI for display
 fn build_message_uri(account_id: &str, mailbox: &str, uidvalidity: u32, uid: u32) -> String {
     format!(
@@ -4196,8 +4268,8 @@ fn parse_bulk_message_ids(account_id: &str, message_ids: &[String]) -> AppResult
 /// Tests for server-side validation and encoding helpers.
 mod tests {
     use super::{
-        encode_raw_source_base64, escape_imap_quoted, is_sent_folder_name, validate_flag,
-        validate_mailbox, validate_search_text,
+        encode_raw_source_base64, escape_imap_quoted, is_sent_folder_name,
+        validate_email_no_wrapper_leak, validate_flag, validate_mailbox, validate_search_text,
     };
 
     #[test]
@@ -4273,5 +4345,74 @@ mod tests {
     fn encodes_raw_source_as_base64() {
         let raw = [0_u8, 159, 255];
         assert_eq!(encode_raw_source_base64(&raw), "AJ//");
+    }
+
+    /// Clean email bodies must pass validation untouched.
+    #[test]
+    fn wrapper_leak_validator_accepts_clean_bodies() {
+        validate_email_no_wrapper_leak("body_text", "Estimado Juan,\n\nSaludos cordiales.")
+            .expect("plain text body must pass");
+        validate_email_no_wrapper_leak(
+            "body_html",
+            "<p>Estimado <strong>Juan</strong>,</p><p>Adjunto el informe.</p>",
+        )
+        .expect("clean HTML body must pass");
+        validate_email_no_wrapper_leak("body_text", "")
+            .expect("empty body must pass — emptiness is a separate check");
+    }
+
+    /// The actual leak from v0.4.5 inbox: body_text ending with `</body_text>`
+    /// followed by the wrapper for body_html. This MUST be rejected.
+    #[test]
+    fn wrapper_leak_validator_rejects_real_world_leak() {
+        let leaked = "Saludos cordiales,\nGustavo</body_text>\n<parameter name=\"body_html\"><p>Estimado</p>";
+        let err = validate_email_no_wrapper_leak("body_text", leaked)
+            .expect_err("must reject leaked wrapper");
+        let msg = err.to_string();
+        assert!(msg.contains("tool-call wrapper syntax"), "got: {msg}");
+        assert!(msg.contains("HARD RULE #1"), "got: {msg}");
+    }
+
+    /// Every individual forbidden marker must be rejected.
+    #[test]
+    fn wrapper_leak_validator_rejects_each_marker() {
+        for marker in [
+            "</body_text>",
+            "<body_text>",
+            "</body_html>",
+            "<body_html>",
+            "<function_calls>",
+            "</function_calls>",
+            "<invoke name=\"foo\">",
+            "</invoke>",
+            "<parameter name=\"body_html\">",
+            "<parameter name='body_text'>",
+        ] {
+            let body = format!("Hola{marker}fin");
+            validate_email_no_wrapper_leak("body_text", &body)
+                .expect_err(&format!("marker '{marker}' must be rejected"));
+        }
+    }
+
+    /// Validator must be case-insensitive — `</BODY_TEXT>` is just as leaky
+    /// as the lowercase form.
+    #[test]
+    fn wrapper_leak_validator_is_case_insensitive() {
+        validate_email_no_wrapper_leak("body_text", "x</BODY_TEXT>y")
+            .expect_err("uppercase marker must be rejected");
+        validate_email_no_wrapper_leak("body_html", "x<Function_Calls>y")
+            .expect_err("mixed-case marker must be rejected");
+    }
+
+    /// Legitimate technical content that mentions `<parameter>` but not the
+    /// body_text/body_html wrapper specifically must still pass — we don't
+    /// want to break tech-support replies about XML schemas.
+    #[test]
+    fn wrapper_leak_validator_allows_generic_parameter_tags() {
+        validate_email_no_wrapper_leak(
+            "body_html",
+            "<p>El XML tiene <code>&lt;parameter name=\"timeout\"&gt;</code> en la config.</p>",
+        )
+        .expect("generic <parameter> mention must pass");
     }
 }

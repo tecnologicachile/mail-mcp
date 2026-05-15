@@ -15,6 +15,28 @@
 
 Most email MCP servers only do IMAP reads. This one does **everything**: read, search, send, reply, forward, bulk operations, Microsoft Graph API, and Exchange Web Services — with real OAuth2, multi-account, and multi-provider support. Written in Rust for speed and safety.
 
+## What's New in v0.4.6
+
+- **Server-side enforcement of HARD RULE #1.** Three releases of prompt-only
+  hardening (v0.4.3 → v0.4.4 → v0.4.5) still left LLMs occasionally leaking
+  literal `</body_text><parameter name="body_html">` markup into the
+  recipient's inbox. v0.4.6 adds a real validator that **rejects** the tool
+  call before any SMTP / Graph / EWS attempt if `body_text` or `body_html`
+  contains tool-call wrapper syntax. The check is wired into all 5 send
+  paths (`smtp_send_message`, `smtp_reply_message`, `smtp_forward_message`,
+  `graph_send_message`, `ews_send_message`).
+- The forbidden markers are case-insensitive and tightly scoped — only
+  the pseudo-tags that have no legitimate use in human correspondence:
+  `<body_text>`, `</body_text>`, `<body_html>`, `</body_html>`,
+  `<function_calls>`, `</function_calls>`, `<invoke name=`, `</invoke>`,
+  and `<parameter name="body_*">`. Generic technical content that happens
+  to mention `<parameter>` for an XML schema or `<invoke>` in a code
+  example still passes.
+- **HARD RULE #1 wording updated** to announce the server-side rejection,
+  so the LLM knows it's a hard contract — not a suggestion it can ignore.
+- No breaking changes for clean callers: well-behaved messages send
+  exactly as before.
+
 ## What's New in v0.4.5
 
 - **`serverInfo` ahora reporta `name="mail-mcp"` + `version` del crate** (antes
