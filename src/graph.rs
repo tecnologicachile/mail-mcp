@@ -18,6 +18,7 @@
 //! Uses the same `MAIL_OAUTH2_<SEGMENT>_*` variables as IMAP/SMTP OAuth2.
 //! No additional configuration needed beyond OAuth2.
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -26,6 +27,18 @@ use crate::oauth2::TokenManager;
 
 /// Microsoft Graph API base URL
 const GRAPH_API_BASE: &str = "https://graph.microsoft.com/v1.0";
+
+/// Threshold (in raw decoded bytes) above which an attachment must be
+/// uploaded via `createUploadSession` instead of inlined in a single
+/// POST to `/me/messages/{id}/attachments`. Per Microsoft Graph docs the
+/// inline limit is 3 MB; we use a slightly conservative value to stay
+/// well clear of base64-overhead edge cases on the wire.
+const ATTACHMENT_INLINE_MAX_BYTES: usize = 3 * 1024 * 1024;
+
+/// Chunk size for createUploadSession PUTs. Graph accepts up to ~4 MB
+/// per chunk; we use exactly 4 MB which divides evenly and stays under
+/// the documented ceiling.
+const UPLOAD_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 
 // ─── Request types (sendMail) ───────────────────────────────────────────────
 
@@ -90,6 +103,16 @@ struct GraphAttachment {
 
 // ─── Request types (reply / patch draft) ────────────────────────────────────
 
+// NOTE: `attachments` is INTENTIONALLY ABSENT from this struct. Microsoft
+// Graph treats `Message.attachments` as a navigation property — PATCH
+// requests against `/me/messages/{id}` silently DISCARD the field
+// (returns 2xx but the attachments never land on the draft). For the
+// createReply → PATCH → send flow we must instead POST each attachment to
+// `/me/messages/{id}/attachments` (or use createUploadSession for ≥3 MB)
+// between PATCH and send. See `upload_attachment_to_draft` below.
+//
+// This was the v0.4.6 silent-data-loss bug — see BUG_GRAPH_ATTACHMENTS.md
+// and the v0.4.7 release notes.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PatchDraftRequest {
@@ -100,8 +123,6 @@ struct PatchDraftRequest {
     cc_recipients: Vec<GraphRecipient>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     bcc_recipients: Vec<GraphRecipient>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    attachments: Vec<GraphAttachment>,
 }
 
 // ─── Response types ─────────────────────────────────────────────────────────
@@ -119,6 +140,12 @@ struct MessageItem {
 #[derive(Debug, Deserialize)]
 struct DraftResponse {
     id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadSessionResponse {
+    upload_url: String,
 }
 
 // ─── Helper constructors ─────────────────────────────────────────────────────
@@ -153,6 +180,173 @@ fn resolve_body(body_html: &Option<String>, body_text: &Option<String>) -> (&'st
         (None, Some(text)) => ("Text", sanitize_cdata(text)),
         (None, None) => ("Text", String::new()),
     }
+}
+
+/// Upload one attachment to an existing draft message.
+///
+/// Used by the createReply → PATCH → send flow because Graph silently
+/// discards `attachments` set via PATCH on `/me/messages/{id}`. After the
+/// PATCH succeeds (body + recipients), every attachment must be POSTed
+/// individually to `/me/messages/{id}/attachments`.
+///
+/// Routing:
+/// - Raw size < 3 MB: single inline POST with `contentBytes` (base64).
+/// - Raw size ≥ 3 MB: `createUploadSession` + 4 MB chunked PUTs to the
+///   returned (pre-authenticated) upload URL.
+async fn upload_attachment_to_draft(
+    client: &reqwest::Client,
+    access_token: &str,
+    draft_id: &str,
+    att: &GraphEmailAttachment,
+) -> AppResult<()> {
+    // Decode once to know the real size and to feed the chunked upload.
+    let raw_bytes = base64::engine::general_purpose::STANDARD
+        .decode(att.content_base64.as_bytes())
+        .map_err(|e| {
+            AppError::invalid(format!(
+                "attachment '{}' has invalid base64 content: {e}",
+                att.filename
+            ))
+        })?;
+
+    if raw_bytes.len() < ATTACHMENT_INLINE_MAX_BYTES {
+        upload_attachment_inline(client, access_token, draft_id, att).await
+    } else {
+        upload_attachment_via_session(client, access_token, draft_id, att, &raw_bytes).await
+    }
+}
+
+/// POST `/me/messages/{id}/attachments` with the file inline in JSON.
+/// Only safe for attachments whose raw (decoded) size is < 3 MB.
+async fn upload_attachment_inline(
+    client: &reqwest::Client,
+    access_token: &str,
+    draft_id: &str,
+    att: &GraphEmailAttachment,
+) -> AppResult<()> {
+    let url = format!("{}/me/messages/{}/attachments", GRAPH_API_BASE, draft_id);
+    let body = serde_json::json!({
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "name": att.filename,
+        "contentType": att.content_type,
+        "contentBytes": att.content_base64,
+    });
+    let response = client
+        .post(&url)
+        .bearer_auth(access_token)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!(
+                "Graph attachment POST failed for '{}': {e}",
+                att.filename
+            ))
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let resp_body = response.text().await.unwrap_or_default();
+        return Err(AppError::Internal(format!(
+            "Graph attachment POST for '{}' failed ({status}): {resp_body}",
+            att.filename
+        )));
+    }
+    Ok(())
+}
+
+/// Create an upload session and PUT the file in 4 MB chunks.
+/// Used for attachments ≥ 3 MB raw size.
+///
+/// The `uploadUrl` returned by `createUploadSession` is pre-authenticated
+/// for the duration of the session — chunks must be PUT WITHOUT a Bearer
+/// token (Graph rejects it with 401 if included).
+async fn upload_attachment_via_session(
+    client: &reqwest::Client,
+    access_token: &str,
+    draft_id: &str,
+    att: &GraphEmailAttachment,
+    raw_bytes: &[u8],
+) -> AppResult<()> {
+    // Step A: createUploadSession.
+    let session_url = format!(
+        "{}/me/messages/{}/attachments/createUploadSession",
+        GRAPH_API_BASE, draft_id
+    );
+    let session_request = serde_json::json!({
+        "AttachmentItem": {
+            "attachmentType": "file",
+            "name": att.filename,
+            "size": raw_bytes.len(),
+            "contentType": att.content_type,
+        }
+    });
+
+    let response = client
+        .post(&session_url)
+        .bearer_auth(access_token)
+        .json(&session_request)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!(
+                "createUploadSession failed for '{}': {e}",
+                att.filename
+            ))
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let resp_body = response.text().await.unwrap_or_default();
+        return Err(AppError::Internal(format!(
+            "createUploadSession for '{}' failed ({status}): {resp_body}",
+            att.filename
+        )));
+    }
+
+    let session: UploadSessionResponse = response.json().await.map_err(|e| {
+        AppError::Internal(format!(
+            "createUploadSession response parse failed for '{}': {e}",
+            att.filename
+        ))
+    })?;
+
+    // Step B: PUT chunks (no Bearer token — uploadUrl is pre-authenticated).
+    let total = raw_bytes.len();
+    let mut offset: usize = 0;
+    while offset < total {
+        let end = (offset + UPLOAD_CHUNK_BYTES).min(total);
+        let chunk = raw_bytes[offset..end].to_vec();
+        let range_header = format!("bytes {}-{}/{}", offset, end - 1, total);
+
+        let put_response = client
+            .put(&session.upload_url)
+            .header("Content-Length", chunk.len().to_string())
+            .header("Content-Range", range_header)
+            .body(chunk)
+            .timeout(std::time::Duration::from_secs(120))
+            .send()
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!(
+                    "upload chunk PUT failed for '{}' at offset {offset}: {e}",
+                    att.filename
+                ))
+            })?;
+
+        if !put_response.status().is_success() {
+            let status = put_response.status();
+            let resp_body = put_response.text().await.unwrap_or_default();
+            return Err(AppError::Internal(format!(
+                "upload chunk for '{}' at offset {offset} failed ({status}): {resp_body}",
+                att.filename
+            )));
+        }
+        offset = end;
+    }
+    Ok(())
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -370,7 +564,9 @@ async fn send_via_reply(
 
     let draft_id = draft.id;
 
-    // Step 2: PATCH the draft with our content
+    // Step 2: PATCH the draft with our content (body + recipients only).
+    // Attachments are deliberately NOT set here — see PatchDraftRequest's
+    // doc comment for the rationale.
     let (content_type, content) = resolve_body(&params.body_html, &params.body_text);
 
     let patch_body = PatchDraftRequest {
@@ -382,7 +578,6 @@ async fn send_via_reply(
         to_recipients: recipients(&params.to),
         cc_recipients: recipients(&params.cc),
         bcc_recipients: recipients(&params.bcc),
-        attachments: build_attachments(&params.attachments),
     };
 
     let patch_url = format!("{}/me/messages/{}", GRAPH_API_BASE, draft_id);
@@ -402,6 +597,14 @@ async fn send_via_reply(
         return Err(AppError::Internal(format!(
             "Graph PATCH draft failed ({status}): {body}"
         )));
+    }
+
+    // Step 2.5: Upload each attachment via the dedicated endpoint.
+    // This is the load-bearing step for the v0.4.7 fix — without it the
+    // PATCH-only flow loses attachments silently because Graph treats
+    // `Message.attachments` as a navigation property and ignores it on PATCH.
+    for att in &params.attachments {
+        upload_attachment_to_draft(client, access_token, &draft_id, att).await?;
     }
 
     // Step 3: Send the draft
@@ -463,6 +666,46 @@ mod tests {
         let rs = recipients(&addrs);
         assert_eq!(rs.len(), 2);
         assert_eq!(rs[0].email_address.address, "a@b.com");
+    }
+
+    /// Regression test for the v0.4.7 fix. `PatchDraftRequest` MUST NOT
+    /// serialize an `attachments` field — Graph silently drops it when
+    /// set via PATCH on `/me/messages/{id}`, which was the v0.4.6 silent
+    /// data-loss bug. Attachments must travel through the dedicated
+    /// `/me/messages/{id}/attachments` endpoint instead.
+    #[test]
+    fn patch_draft_request_never_serializes_attachments() {
+        let req = PatchDraftRequest {
+            subject: "Re: test".to_owned(),
+            body: GraphBody {
+                content_type: "HTML",
+                content: "<p>x</p>".to_owned(),
+            },
+            to_recipients: vec![recipient("to@test.com")],
+            cc_recipients: vec![],
+            bcc_recipients: vec![],
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(
+            json.get("attachments").is_none(),
+            "PatchDraftRequest must not include attachments (Graph PATCH discards them); got: {json}"
+        );
+        // Sanity-check the fields that DO travel through PATCH.
+        assert_eq!(json["subject"], "Re: test");
+        assert_eq!(
+            json["toRecipients"][0]["emailAddress"]["address"],
+            "to@test.com"
+        );
+    }
+
+    /// The inline-vs-session threshold must match the Microsoft Graph
+    /// documented limit (3 MB raw). Hard-codes the constant so a future
+    /// edit doesn't silently shift the boundary into an invalid range.
+    #[test]
+    fn attachment_inline_threshold_matches_graph_spec() {
+        assert_eq!(ATTACHMENT_INLINE_MAX_BYTES, 3 * 1024 * 1024);
+        assert!(UPLOAD_CHUNK_BYTES <= 4 * 1024 * 1024);
+        assert!(UPLOAD_CHUNK_BYTES > 0);
     }
 
     #[test]

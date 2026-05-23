@@ -15,6 +15,32 @@
 
 Most email MCP servers only do IMAP reads. This one does **everything**: read, search, send, reply, forward, bulk operations, Microsoft Graph API, and Exchange Web Services — with real OAuth2, multi-account, and multi-provider support. Written in Rust for speed and safety.
 
+## What's New in v0.4.7
+
+- **Fix crítico — `graph_send_message` perdía adjuntos silenciosamente en
+  respuestas threadeadas.** Cuando se llamaba con `in_reply_to` + `attachments`,
+  el flujo `createReply → PATCH → send` incluía los adjuntos en el PATCH
+  contra `/me/messages/{id}`. Microsoft Graph trata `Message.attachments`
+  como navigation property y **descarta el campo silenciosamente** en PATCH
+  (respuesta 2xx, sin error), por lo que el mensaje se enviaba como
+  single-part `text/html` sin el archivo. El MCP reportaba `status: ok` y
+  el llamador asumía éxito. Pérdida de datos invisible.
+- **El fix:** en `send_via_reply()`, los adjuntos ahora se suben uno por uno
+  a `POST /me/messages/{draft_id}/attachments` entre el PATCH y el send.
+  Para archivos < 3 MB se hace inline (JSON con `contentBytes` base64);
+  para archivos ≥ 3 MB se usa `createUploadSession` con PUTs de 4 MB
+  chunked. El campo `attachments` se eliminó del struct `PatchDraftRequest`
+  para que la regresión sea imposible de reintroducir por error de tipos.
+- **Sin cambios para los flujos que ya funcionaban.** `send_via_sendmail`
+  (correos nuevos sin `in_reply_to`) usa `POST /me/sendMail` con
+  `attachments` inline en el JSON — Graph SÍ acepta el campo en ese
+  endpoint y nunca lo descartó. Esa ruta queda intacta.
+- **Test de regresión añadido:** `patch_draft_request_never_serializes_attachments`
+  falla si alguien vuelve a agregar el campo al struct.
+- **Referencia:** `BUG_GRAPH_ATTACHMENTS.md` en la raíz del repo documenta
+  la reproducción completa, la causa raíz y la evidencia empírica que
+  llevó al fix.
+
 ## What's New in v0.4.6
 
 - **Server-side enforcement of HARD RULE #1.** Three releases of prompt-only
