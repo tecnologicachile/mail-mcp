@@ -57,11 +57,17 @@ impl OAuth2Provider {
         }
     }
 
-    /// Token endpoint URL for this provider
-    pub fn token_url(&self) -> &'static str {
+    /// Token endpoint URL for this provider.
+    ///
+    /// For Microsoft, `tenant` can be a tenant ID (UUID) for tenant-specific
+    /// endpoints, or `"common"` (the default) for the multi-tenant endpoint.
+    /// Tenant-specific endpoints are required for Thunderbird-style tokens.
+    pub fn token_url(&self, tenant: &str) -> String {
         match self {
-            Self::Google => "https://oauth2.googleapis.com/token",
-            Self::Microsoft => "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+            Self::Google => "https://oauth2.googleapis.com/token".to_owned(),
+            Self::Microsoft => format!(
+                "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+            ),
         }
     }
 }
@@ -75,6 +81,8 @@ pub struct OAuth2AccountConfig {
     pub client_id: String,
     pub client_secret: SecretString,
     pub refresh_token: SecretString,
+    /// Resolved token endpoint URL (built at load time from provider + tenant).
+    pub token_url: String,
 }
 
 // ─── Cached token ────────────────────────────────────────────────────────────
@@ -187,7 +195,7 @@ impl TokenManager {
 
         let response = self
             .http
-            .post(config.provider.token_url())
+            .post(&config.token_url)
             .form(&params)
             .timeout(Duration::from_secs(30))
             .send()
@@ -338,13 +346,12 @@ mod tests {
     #[test]
     fn provider_token_urls() {
         assert_eq!(
-            OAuth2Provider::Google.token_url(),
+            OAuth2Provider::Google.token_url("common"),
             "https://oauth2.googleapis.com/token"
         );
-        assert!(
-            OAuth2Provider::Microsoft
-                .token_url()
-                .contains("login.microsoftonline.com")
+        assert_eq!(
+            OAuth2Provider::Microsoft.token_url("common"),
+            "https://login.microsoftonline.com/common/oauth2/v2.0/token"
         );
     }
 
