@@ -728,6 +728,9 @@ pub struct EwsSendMessageInput {
     pub in_reply_to: Option<String>,
     /// References header for threading (optional)
     pub references: Option<String>,
+    /// File attachments (optional)
+    #[serde(default)]
+    pub attachments: Vec<AttachmentInput>,
 }
 
 /// Mailbox status information
