@@ -17,58 +17,58 @@ Most email MCP servers only do IMAP reads. This one does **everything**: read, s
 
 ## What's New in v0.4.8
 
-- **`SAVE_SENT` ahora es por cuenta + con default según proveedor.** Antes,
-  guardar una copia del correo enviado en la carpeta Sent vía IMAP APPEND se
-  controlaba con un único flag global `MAIL_SMTP_SAVE_SENT`. El problema: los
-  proveedores que **ya guardan** el enviado server-side (Gmail, Zoho)
-  terminaban con **dos copias idénticas** en Sent, mientras que un SMTP
-  genérico u Office 365 (que **no** auto-guardan en envío SMTP) perdían la
-  copia si el flag estaba en `false`.
-- **Default provider-aware** (cuando no hay nada configurado):
-  - **Gmail** (`smtp.gmail.com`): guarda server-side y deduplica por
-    Message-ID → el MCP **no** appendea (`false`).
-  - **Zoho** (`smtp.zoho.com`): guarda server-side pero **no** deduplica →
-    el MCP **no** appendea (`false`), evitando el duplicado.
-  - **Office 365 / SMTP genérico**: **no** auto-guardan en envío SMTP → el
-    MCP **sí** appendea (`true`), o el enviado no quedaría en ningún lado.
-- **Override por cuenta**: `MAIL_SMTP_<ID>_SAVE_SENT=true|false` tiene
-  prioridad sobre todo. El global `MAIL_SMTP_SAVE_SENT` sigue funcionando
-  como override coarse (gana sobre el default por proveedor, pierde frente
-  al override por cuenta).
-- Precedencia: **por-cuenta** → **global** → **default por proveedor**.
+- **`SAVE_SENT` is now per-account with a provider-aware default.**
+  Previously, saving a copy of outgoing mail to the Sent folder via IMAP
+  APPEND was controlled by a single global flag, `MAIL_SMTP_SAVE_SENT`. The
+  problem: providers that **already save** sent mail server-side (Gmail,
+  Zoho) ended up with **two identical copies** in Sent, while a generic SMTP
+  server or Office 365 (which do **not** auto-save on SMTP submission) lost
+  the copy entirely when the flag was `false`.
+- **Provider-aware default** (when nothing is configured):
+  - **Gmail** (`smtp.gmail.com`): saves server-side and deduplicates by
+    Message-ID → the MCP does **not** append (`false`).
+  - **Zoho** (`smtp.zoho.com`): saves server-side but does **not**
+    deduplicate → the MCP does **not** append (`false`), avoiding the
+    duplicate.
+  - **Office 365 / generic SMTP**: do **not** auto-save on SMTP submission →
+    the MCP **does** append (`true`), or the sent copy would be lost.
+- **Per-account override**: `MAIL_SMTP_<ID>_SAVE_SENT=true|false` takes
+  priority over everything. The global `MAIL_SMTP_SAVE_SENT` still works as a
+  coarse override (wins over the provider default, loses to the per-account
+  override).
+- Precedence: **per-account** → **global** → **provider-aware default**.
 
-| Proveedor | Auto-guarda server-side | Default del MCP |
+| Provider | Auto-saves server-side | MCP default |
 |---|---|---|
-| Gmail | Sí (con dedupe) | `false` |
-| Zoho | Sí (sin dedupe) | `false` |
+| Gmail | Yes (with dedupe) | `false` |
+| Zoho | Yes (no dedupe) | `false` |
 | Office 365 (SMTP) | No | `true` |
-| SMTP genérico / relays | No | `true` |
+| Generic SMTP / relays | No | `true` |
 
 ## What's New in v0.4.7
 
-- **Fix crítico — `graph_send_message` perdía adjuntos silenciosamente en
-  respuestas threadeadas.** Cuando se llamaba con `in_reply_to` + `attachments`,
-  el flujo `createReply → PATCH → send` incluía los adjuntos en el PATCH
-  contra `/me/messages/{id}`. Microsoft Graph trata `Message.attachments`
-  como navigation property y **descarta el campo silenciosamente** en PATCH
-  (respuesta 2xx, sin error), por lo que el mensaje se enviaba como
-  single-part `text/html` sin el archivo. El MCP reportaba `status: ok` y
-  el llamador asumía éxito. Pérdida de datos invisible.
-- **El fix:** en `send_via_reply()`, los adjuntos ahora se suben uno por uno
-  a `POST /me/messages/{draft_id}/attachments` entre el PATCH y el send.
-  Para archivos < 3 MB se hace inline (JSON con `contentBytes` base64);
-  para archivos ≥ 3 MB se usa `createUploadSession` con PUTs de 4 MB
-  chunked. El campo `attachments` se eliminó del struct `PatchDraftRequest`
-  para que la regresión sea imposible de reintroducir por error de tipos.
-- **Sin cambios para los flujos que ya funcionaban.** `send_via_sendmail`
-  (correos nuevos sin `in_reply_to`) usa `POST /me/sendMail` con
-  `attachments` inline en el JSON — Graph SÍ acepta el campo en ese
-  endpoint y nunca lo descartó. Esa ruta queda intacta.
-- **Test de regresión añadido:** `patch_draft_request_never_serializes_attachments`
-  falla si alguien vuelve a agregar el campo al struct.
-- **Referencia:** `BUG_GRAPH_ATTACHMENTS.md` en la raíz del repo documenta
-  la reproducción completa, la causa raíz y la evidencia empírica que
-  llevó al fix.
+- **Critical fix — `graph_send_message` silently dropped attachments on
+  threaded replies.** When called with `in_reply_to` + `attachments`, the
+  `createReply → PATCH → send` flow included the attachments in the PATCH
+  against `/me/messages/{id}`. Microsoft Graph treats `Message.attachments`
+  as a navigation property and **silently discards the field** on PATCH
+  (2xx response, no error), so the message went out as single-part
+  `text/html` with no file. The MCP returned `status: ok` and the caller
+  assumed success. Invisible data loss.
+- **The fix:** in `send_via_reply()`, attachments are now uploaded one by one
+  to `POST /me/messages/{draft_id}/attachments` between the PATCH and the
+  send. Files < 3 MB go inline (JSON with base64 `contentBytes`); files
+  ≥ 3 MB use `createUploadSession` with 4 MB chunked PUTs. The `attachments`
+  field was removed from the `PatchDraftRequest` struct so the regression
+  cannot be reintroduced by a type-correct edit.
+- **No change to flows that already worked.** `send_via_sendmail` (new
+  messages without `in_reply_to`) uses `POST /me/sendMail` with `attachments`
+  inline in the JSON — Graph DOES accept the field on that endpoint and never
+  dropped it. That path is untouched.
+- **Regression test added:** `patch_draft_request_never_serializes_attachments`
+  fails if anyone re-adds the field to the struct.
+- **Reference:** `BUG_GRAPH_ATTACHMENTS.md` at the repo root documents the
+  full reproduction, root cause, and the empirical evidence behind the fix.
 
 ## What's New in v0.4.6
 
@@ -94,29 +94,25 @@ Most email MCP servers only do IMAP reads. This one does **everything**: read, s
 
 ## What's New in v0.4.5
 
-- **`serverInfo` ahora reporta `name="mail-mcp"` + `version` del crate** (antes
-  el framework devolvía su propio `rmcp 0.16.0`, que nunca cambia entre
-  releases). Útil para verificar la versión activa con `/mcp` y para que
-  cualquier cache que el cliente lleve por (server, version) se invalide en
-  cada bump.
-- **Reorganización de las instrucciones MCP**: las 3 reglas críticas
-  anti-concatenación (que en v0.4.3 y v0.4.4 estaban al final del bloque y
-  podían perderse por truncamientos / atención diluida) ahora aparecen como
-  **HARD RULE #1, #2, #3 al INICIO**, justo después del título. Consolidadas
-  en 3 párrafos breves (antes eran 3 secciones largas de ~1500 caracteres
-  combinados).
-- **Sin cambios funcionales en el servidor.** Mismo SMTP/IMAP/EWS/Graph,
-  mismo set de tools, mismo comportamiento. Solo cambios en el texto
-  expuesto al cliente.
+- **`serverInfo` now reports `name="mail-mcp"` + the crate `version`** (the
+  framework previously returned its own `rmcp 0.16.0`, which never changes
+  between releases). Useful for verifying the active version with `/mcp`, and
+  so any client-side cache keyed by (server, version) invalidates on each bump.
+- **MCP instructions reorganized**: the 3 critical anti-concatenation rules
+  (which in v0.4.3 and v0.4.4 sat at the end of the block and could be lost
+  to truncation / diluted attention) now appear as **HARD RULE #1, #2, #3 at
+  the TOP**, right after the title. Consolidated into 3 short paragraphs
+  (previously 3 long sections, ~1500 characters combined).
+- **No functional changes to the server.** Same SMTP/IMAP/EWS/Graph, same
+  tool set, same behavior. Only the text exposed to the client changed.
 
-### Importante para que estas reglas tomen efecto
+### Important for these rules to take effect
 
-Los clientes que reanudan una sesión con `claude --continue` (o
-`/resume`) **NO refrescan el `system_prompt` MCP** — preservan el del
-primer handshake de esa sesión. Si tu sesión es de antes de v0.4.5,
-las reglas no llegarán a tu contexto aunque el binario en disco esté
-actualizado. Para recibirlas, arranca una sesión NUEVA en el proyecto
-(no `--continue`).
+Clients that resume a session with `claude --continue` (or `/resume`) do
+**NOT** refresh the MCP `system_prompt` — they keep the one from that
+session's first handshake. If your session predates v0.4.5, the rules won't
+reach your context even if the on-disk binary is updated. To receive them,
+start a NEW session in the project (not `--continue`).
 
 ## What's New in v0.4.4
 
