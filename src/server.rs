@@ -788,6 +788,7 @@ impl MailImapServer {
                 (None, None) => ("", "Text"),
             };
 
+            let attachments = decode_attachments(&input.attachments)?;
             let params = crate::ews::EwsSendParams {
                 to: &input.to,
                 cc: &input.cc,
@@ -797,6 +798,7 @@ impl MailImapServer {
                 body_type,
                 in_reply_to: input.in_reply_to.as_deref(),
                 references: input.references.as_deref(),
+                attachments: &attachments,
             };
             crate::ews::send_email(tm, &input.account_id, &params).await?;
 

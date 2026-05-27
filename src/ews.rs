@@ -215,12 +215,15 @@ pub struct EwsSendParams<'a> {
     pub body_type: &'a str,
     pub in_reply_to: Option<&'a str>,
     pub references: Option<&'a str>,
+    pub attachments: &'a [crate::smtp::EmailAttachment],
 }
 
-/// Send an email via EWS `CreateItem` with `SendAndSaveCopy` disposition.
+/// Send an email via EWS.
 ///
-/// Supports BCC and sets `InternetMessageHeaders` for In-Reply-To and
-/// References so Exchange clients thread the reply correctly.
+/// Without attachments: single `CreateItem` with `SendAndSaveCopy`.
+/// With attachments: `CreateItem` as draft → `CreateAttachment` per file → `SendItem`.
+/// EWS does not allow setting `Attachments` inline in `CreateItem` — that property
+/// is read-only on the Message type and must go through the dedicated attachment endpoint.
 pub async fn send_email(
     token_manager: &TokenManager,
     account_id: &str,
@@ -248,14 +251,42 @@ pub async fn send_email(
 
     let body_escaped = escape_xml(params.body);
     let subject_escaped = escape_xml(params.subject);
-    // body_type is a trusted constant ("HTML" or "Text"), so it doesn't need
-    // XML escaping — it's interpolated directly into the BodyType attribute.
     let body_type = params.body_type;
 
+    if params.attachments.is_empty() {
+        // Fast path: single CreateItem with SendAndSaveCopy.
+        let soap = format!(
+            r#"<m:CreateItem MessageDisposition="SendAndSaveCopy">
+          <m:SavedItemFolderId>
+            <t:DistinguishedFolderId Id="sentitems"/>
+          </m:SavedItemFolderId>
+          <m:Items>
+            <t:Message>
+              <t:Subject>{subject_escaped}</t:Subject>
+              <t:Body BodyType="{body_type}">{body_escaped}</t:Body>
+              {headers_section}
+              <t:ToRecipients>{to_xml}</t:ToRecipients>
+              {cc_section}
+              {bcc_section}
+            </t:Message>
+          </m:Items>
+        </m:CreateItem>"#
+        );
+        let xml = ews_request(token_manager, account_id, &soap).await?;
+        if xml.contains("ResponseClass=\"Error\"") {
+            let msg = extract_xml_text(&xml, "MessageText").unwrap_or_default();
+            return Err(AppError::Internal(format!("EWS send failed: {msg}")));
+        }
+        return Ok(());
+    }
+
+    // Attachment path: CreateItem as draft → CreateAttachment × N → SendItem.
+
+    // Step 1: create draft in Drafts folder.
     let soap = format!(
-        r#"<m:CreateItem MessageDisposition="SendAndSaveCopy">
+        r#"<m:CreateItem MessageDisposition="SaveOnly">
       <m:SavedItemFolderId>
-        <t:DistinguishedFolderId Id="sentitems"/>
+        <t:DistinguishedFolderId Id="drafts"/>
       </m:SavedItemFolderId>
       <m:Items>
         <t:Message>
@@ -269,16 +300,111 @@ pub async fn send_email(
       </m:Items>
     </m:CreateItem>"#
     );
-
     let xml = ews_request(token_manager, account_id, &soap).await?;
+    if xml.contains("ResponseClass=\"Error\"") {
+        let msg = extract_xml_text(&xml, "MessageText").unwrap_or_default();
+        return Err(AppError::Internal(format!("EWS create draft failed: {msg}")));
+    }
+    let item_id = extract_attr(&xml, "ItemId", "Id").ok_or_else(|| {
+        AppError::Internal("EWS CreateItem response missing ItemId".to_owned())
+    })?;
+    let change_key = extract_attr(&xml, "ItemId", "ChangeKey").unwrap_or_default();
 
-    // Check for errors in response
+    // Step 2: attach each file — each CreateAttachment returns a new ChangeKey.
+    let mut change_key = change_key;
+    for att in params.attachments {
+        change_key = create_attachment(token_manager, account_id, &item_id, &change_key, att).await?;
+    }
+
+    // Step 3: fetch the current ChangeKey — Exchange updates it server-side during
+    // attachment indexing so the key from CreateAttachment is already stale.
+    let current_change_key =
+        fetch_change_key(token_manager, account_id, &item_id).await?;
+    let item_id_escaped = escape_xml(&item_id);
+    let change_key_escaped = escape_xml(&current_change_key);
+    let soap = format!(
+        r#"<m:SendItem SaveItemToFolder="true">
+      <m:ItemIds>
+        <t:ItemId Id="{item_id_escaped}" ChangeKey="{change_key_escaped}"/>
+      </m:ItemIds>
+      <m:SavedItemFolderId>
+        <t:DistinguishedFolderId Id="sentitems"/>
+      </m:SavedItemFolderId>
+    </m:SendItem>"#
+    );
+    let xml = ews_request(token_manager, account_id, &soap).await?;
     if xml.contains("ResponseClass=\"Error\"") {
         let msg = extract_xml_text(&xml, "MessageText").unwrap_or_default();
         return Err(AppError::Internal(format!("EWS send failed: {msg}")));
     }
 
     Ok(())
+}
+
+/// Attach a single file to an existing draft item via `CreateAttachment`.
+/// Returns the updated ChangeKey from the response (EWS increments it on each mutation).
+async fn create_attachment(
+    token_manager: &TokenManager,
+    account_id: &str,
+    item_id: &str,
+    change_key: &str,
+    att: &crate::smtp::EmailAttachment,
+) -> AppResult<String> {
+    use base64::Engine;
+    let name = escape_xml(&att.filename);
+    let content_type = escape_xml(&att.content_type);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&att.content);
+    let item_id_escaped = escape_xml(item_id);
+    let change_key_escaped = escape_xml(change_key);
+
+    let soap = format!(
+        r#"<m:CreateAttachment>
+      <m:ParentItemId Id="{item_id_escaped}" ChangeKey="{change_key_escaped}"/>
+      <m:Attachments>
+        <t:FileAttachment>
+          <t:Name>{name}</t:Name>
+          <t:ContentType>{content_type}</t:ContentType>
+          <t:Content>{b64}</t:Content>
+        </t:FileAttachment>
+      </m:Attachments>
+    </m:CreateAttachment>"#
+    );
+    let xml = ews_request(token_manager, account_id, &soap).await?;
+    if xml.contains("ResponseClass=\"Error\"") {
+        let msg = extract_xml_text(&xml, "MessageText").unwrap_or_default();
+        return Err(AppError::Internal(format!(
+            "EWS CreateAttachment failed for '{}': {msg}",
+            att.filename
+        )));
+    }
+    // RootItemChangeKey reflects the updated ChangeKey of the parent item.
+    let new_change_key = extract_attr(&xml, "RootItemId", "RootItemChangeKey")
+        .unwrap_or_else(|| change_key.to_owned());
+    Ok(new_change_key)
+}
+
+/// Fetch the current ChangeKey for an item by doing a minimal GetItem.
+/// Used before SendItem to get a fresh key after attachment indexing mutates it.
+async fn fetch_change_key(
+    token_manager: &TokenManager,
+    account_id: &str,
+    item_id: &str,
+) -> AppResult<String> {
+    let item_id_escaped = escape_xml(item_id);
+    let soap = format!(
+        r#"<m:GetItem>
+      <m:ItemShape>
+        <t:BaseShape>IdOnly</t:BaseShape>
+      </m:ItemShape>
+      <m:ItemIds>
+        <t:ItemId Id="{item_id_escaped}"/>
+      </m:ItemIds>
+    </m:GetItem>"#
+    );
+    let xml = ews_request(token_manager, account_id, &soap).await?;
+    extract_attr(&xml, "ItemId", "ChangeKey").ok_or_else(|| {
+        AppError::Internal("EWS GetItem response missing ChangeKey".to_owned())
+    })
 }
 
 /// Render a list of recipient addresses as EWS `<t:Mailbox>` elements.
@@ -291,6 +417,8 @@ fn render_mailboxes(addrs: &[String]) -> String {
         })
         .collect()
 }
+
+
 
 /// Build an `<t:InternetMessageHeaders>` block for threading headers.
 /// Returns an empty string if neither header is set.
