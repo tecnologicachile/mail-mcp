@@ -511,17 +511,20 @@ pub async fn uid_expunge(
 
 /// Append raw RFC822 message to mailbox
 ///
-/// Used for cross-account copy operations. Does not return the new UID
+/// Used for cross-account copy operations and sent-mail archival.
+/// Pass `flags` to set initial flags on the appended message (e.g.
+/// `Some("\\Seen")` for sent mail). Does not return the new UID
 /// directly (would require `UIDPLUS` capability).
 pub async fn append(
     server: &ServerConfig,
     session: &mut ImapSession,
     mailbox: &str,
+    flags: Option<&str>,
     content: &[u8],
 ) -> AppResult<()> {
     timeout(
         socket_timeout(server),
-        session.append(mailbox, None, None, content),
+        session.append(mailbox, flags, None, content),
     )
     .await
     .map_err(|_| AppError::Timeout("APPEND timed out".to_owned()))
@@ -1071,7 +1074,7 @@ mod tests {
         let message = format!(
             "From: sender@example.com\r\nTo: user@example.com\r\nSubject: {subject}\r\n\r\nWrite-path body\r\n"
         );
-        append(&config, &mut session, "INBOX", message.as_bytes())
+        append(&config, &mut session, "INBOX", None, message.as_bytes())
             .await
             .expect("APPEND should succeed");
 
