@@ -340,6 +340,11 @@ fn load_oauth2_accounts() -> AppResult<HashMap<String, OAuth2AccountConfig>> {
         let client_id = required_oauth2_env(&format!("{prefix}CLIENT_ID"), &account_id)?;
         let client_secret = required_oauth2_env(&format!("{prefix}CLIENT_SECRET"), &account_id)?;
         let refresh_token = required_oauth2_env(&format!("{prefix}REFRESH_TOKEN"), &account_id)?;
+        let tenant = env::var(format!("{prefix}TENANT_ID"))
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "common".to_owned());
+        let token_url = provider.token_url(&tenant);
 
         oauth2_accounts.insert(
             account_id,
@@ -348,6 +353,7 @@ fn load_oauth2_accounts() -> AppResult<HashMap<String, OAuth2AccountConfig>> {
                 client_id,
                 client_secret: SecretString::new(client_secret.into()),
                 refresh_token: SecretString::new(refresh_token.into()),
+                token_url,
             },
         );
     }
@@ -389,6 +395,11 @@ fn load_graph_oauth2_accounts() -> AppResult<HashMap<String, OAuth2AccountConfig
         let client_id = required_oauth2_env(&format!("{prefix}CLIENT_ID"), &account_id)?;
         let client_secret = required_oauth2_env(&format!("{prefix}CLIENT_SECRET"), &account_id)?;
         let refresh_token = required_oauth2_env(&format!("{prefix}REFRESH_TOKEN"), &account_id)?;
+        let tenant = env::var(format!("{prefix}TENANT_ID"))
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "common".to_owned());
+        let token_url = provider.token_url(&tenant);
 
         accounts.insert(
             account_id,
@@ -397,6 +408,7 @@ fn load_graph_oauth2_accounts() -> AppResult<HashMap<String, OAuth2AccountConfig
                 client_id,
                 client_secret: SecretString::new(client_secret.into()),
                 refresh_token: SecretString::new(refresh_token.into()),
+                token_url,
             },
         );
     }
@@ -456,6 +468,11 @@ fn load_ews_accounts() -> AppResult<(
             Ok(v) if !v.trim().is_empty() => v,
             _ => continue,
         };
+        let tenant = env::var(format!("{prefix}TENANT_ID"))
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "common".to_owned());
+        let token_url = OAuth2Provider::Microsoft.token_url(&tenant);
 
         ews_oauth2.insert(
             account_id,
@@ -464,6 +481,7 @@ fn load_ews_accounts() -> AppResult<(
                 client_id,
                 client_secret: SecretString::new(client_secret.into()),
                 refresh_token: SecretString::new(refresh_token.into()),
+                token_url,
             },
         );
     }
