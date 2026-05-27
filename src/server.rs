@@ -2863,7 +2863,7 @@ impl MailImapServer {
         .await?;
 
         // Optionally save to Sent folder via IMAP
-        if self.config.smtp_save_sent {
+        if self.config.should_save_sent(&input.account_id) {
             if let Err(e) = self
                 .save_to_sent_folder(&input.account_id, &sent.rfc822)
                 .await
@@ -3004,7 +3004,7 @@ impl MailImapServer {
         )
         .await?;
 
-        if self.config.smtp_save_sent {
+        if self.config.should_save_sent(&input.account_id) {
             if let Err(e) = self
                 .save_to_sent_folder(&input.account_id, &sent.rfc822)
                 .await
@@ -3113,7 +3113,7 @@ impl MailImapServer {
         )
         .await?;
 
-        if self.config.smtp_save_sent {
+        if self.config.should_save_sent(&input.account_id) {
             if let Err(e) = self
                 .save_to_sent_folder(&input.account_id, &sent.rfc822)
                 .await

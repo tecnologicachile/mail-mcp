@@ -71,6 +71,14 @@ pub struct SmtpAccountConfig {
     pub security: SmtpSecurity,
     /// Authentication method
     pub auth_method: AuthMethod,
+    /// Per-account override for saving sent mail to the IMAP Sent folder.
+    ///
+    /// `None` = not set for this account; the effective value falls back to
+    /// the global `MAIL_SMTP_SAVE_SENT`, and if that is also unset, to a
+    /// provider-aware default (see `ServerConfig::should_save_sent`).
+    /// `Some(true/false)` = explicit per-account choice via
+    /// `MAIL_SMTP_<ID>_SAVE_SENT`.
+    pub save_sent: Option<bool>,
 }
 
 // ─── Email composition ───────────────────────────────────────────────────────

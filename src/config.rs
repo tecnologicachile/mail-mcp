@@ -69,8 +69,15 @@ pub struct ServerConfig {
     pub smtp_accounts: HashMap<String, SmtpAccountConfig>,
     /// Whether SMTP send operations are enabled
     pub smtp_write_enabled: bool,
-    /// Whether to save sent messages to IMAP Sent folder
-    pub smtp_save_sent: bool,
+    /// Global override for saving sent messages to the IMAP Sent folder.
+    ///
+    /// `None` = unset; the effective per-account value comes from a
+    /// provider-aware default (Gmail/Zoho already save server-side, so the
+    /// MCP must NOT append a duplicate; generic SMTP and Office 365 do not,
+    /// so the MCP should). `Some(bool)` = explicit coarse override for all
+    /// accounts. A per-account `MAIL_SMTP_<ID>_SAVE_SENT` takes precedence
+    /// over this. See `should_save_sent`.
+    pub smtp_save_sent: Option<bool>,
     /// SMTP connect/handshake/auth timeout in milliseconds
     ///
     /// Bounds the TCP connect, TLS handshake, and authentication phases.
@@ -160,7 +167,7 @@ impl ServerConfig {
             ews_oauth2_accounts,
             smtp_accounts,
             smtp_write_enabled: parse_bool_env("MAIL_SMTP_WRITE_ENABLED", false)?,
-            smtp_save_sent: parse_bool_env("MAIL_SMTP_SAVE_SENT", false)?,
+            smtp_save_sent: parse_opt_bool_env("MAIL_SMTP_SAVE_SENT")?,
             // Backward compat: MAIL_SMTP_TIMEOUT_MS (deprecated, single timeout)
             // is honored as the send timeout if set, but the new vars take priority.
             smtp_connect_timeout_ms: parse_u64_env("MAIL_SMTP_CONNECT_TIMEOUT_MS", 30_000)?,
@@ -198,6 +205,52 @@ impl ServerConfig {
             AppError::NotFound(format!("SMTP account '{account_id}' is not configured"))
         })
     }
+
+    /// Decide whether to append a copy of an outgoing SMTP message to the
+    /// account's IMAP Sent folder.
+    ///
+    /// Precedence (highest first):
+    /// 1. Per-account `MAIL_SMTP_<ID>_SAVE_SENT` (explicit).
+    /// 2. Global `MAIL_SMTP_SAVE_SENT` (explicit, coarse override).
+    /// 3. Provider-aware default: `false` for providers that already save a
+    ///    server-side copy (Gmail, Zoho) — appending would duplicate the
+    ///    Sent folder — and `true` otherwise (generic SMTP relays and
+    ///    Office 365 SMTP submission do NOT auto-save, so the copy would be
+    ///    lost without this).
+    ///
+    /// Unknown account IDs return `false` (nothing to save).
+    pub fn should_save_sent(&self, account_id: &str) -> bool {
+        let account = self.smtp_accounts.get(account_id);
+
+        // 1. Per-account explicit override wins.
+        if let Some(Some(explicit)) = account.map(|a| a.save_sent) {
+            return explicit;
+        }
+
+        // 2. Global explicit override.
+        if let Some(global) = self.smtp_save_sent {
+            return global;
+        }
+
+        // 3. Provider-aware default based on the SMTP host.
+        account
+            .map(|a| !provider_auto_saves_sent(&a.host))
+            .unwrap_or(false)
+    }
+}
+
+/// Whether an SMTP provider saves a server-side copy of sent mail to the
+/// Sent folder automatically (so the MCP must NOT append its own copy).
+///
+/// - Gmail saves and de-duplicates by Message-ID; a redundant APPEND is at
+///   best wasteful.
+/// - Zoho saves but does NOT de-duplicate, so an APPEND produces two
+///   identical messages in the Sent folder.
+/// - Office 365 SMTP submission and generic relays do NOT auto-save, so
+///   they are intentionally excluded here (the MCP should save for them).
+fn provider_auto_saves_sent(host: &str) -> bool {
+    let h = host.to_ascii_lowercase();
+    h.contains("gmail") || h.contains("googlemail") || h.contains("zoho")
 }
 
 /// Load a single account configuration from environment
@@ -473,6 +526,8 @@ fn load_smtp_accounts(
             AuthMethod::Password
         };
 
+        let save_sent = parse_opt_bool_env(&format!("{prefix}SAVE_SENT"))?;
+
         smtp_accounts.insert(
             account_id.clone(),
             SmtpAccountConfig {
@@ -483,6 +538,7 @@ fn load_smtp_accounts(
                 pass,
                 security,
                 auth_method,
+                save_sent,
             },
         );
     }
@@ -565,6 +621,29 @@ fn parse_bool_value(value: &str) -> Option<bool> {
         "1" | "true" | "yes" | "y" | "on" => Some(true),
         "0" | "false" | "no" | "n" | "off" => Some(false),
         _ => None,
+    }
+}
+
+/// Parse an optional boolean environment variable.
+///
+/// Returns `Ok(None)` when the variable is unset or empty, distinguishing
+/// "not configured" from an explicit `true`/`false`. Used for settings with
+/// a computed (non-constant) default, such as per-account / provider-aware
+/// `SAVE_SENT`.
+///
+/// # Errors
+///
+/// Returns `InvalidInput` if the variable is set to an unrecognized value.
+fn parse_opt_bool_env(key: &str) -> AppResult<Option<bool>> {
+    match env::var(key) {
+        Ok(v) if v.trim().is_empty() => Ok(None),
+        Ok(v) => parse_bool_value(&v).map(Some).ok_or_else(|| {
+            AppError::InvalidInput(format!("invalid boolean environment variable {key}: '{v}'"))
+        }),
+        Err(VarError::NotPresent) => Ok(None),
+        Err(VarError::NotUnicode(_)) => Err(AppError::InvalidInput(format!(
+            "environment variable {key} contains non-unicode data"
+        ))),
     }
 }
 
@@ -653,7 +732,103 @@ fn resolve_smtp_send_timeout(new_var: Option<u64>, legacy_var: Option<u64>) -> u
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_bool_value, resolve_smtp_send_timeout};
+    use super::{
+        AuthMethod, ServerConfig, parse_bool_value, provider_auto_saves_sent,
+        resolve_smtp_send_timeout,
+    };
+    use crate::smtp::{SmtpAccountConfig, SmtpSecurity};
+    use std::collections::{BTreeMap, HashMap};
+
+    /// Build a ServerConfig with one SMTP account at `host` whose per-account
+    /// SAVE_SENT is `account_save_sent`, and a global `MAIL_SMTP_SAVE_SENT`
+    /// of `global_save_sent`. Only the fields exercised by `should_save_sent`
+    /// matter; the rest are filled with inert defaults.
+    fn cfg_with_smtp(
+        host: &str,
+        account_save_sent: Option<bool>,
+        global_save_sent: Option<bool>,
+    ) -> ServerConfig {
+        let mut smtp_accounts = HashMap::new();
+        smtp_accounts.insert(
+            "acct".to_owned(),
+            SmtpAccountConfig {
+                account_id: "acct".to_owned(),
+                host: host.to_owned(),
+                port: 587,
+                user: "u@example.com".to_owned(),
+                pass: None,
+                security: SmtpSecurity::Starttls,
+                auth_method: AuthMethod::Password,
+                save_sent: account_save_sent,
+            },
+        );
+        ServerConfig {
+            accounts: BTreeMap::new(),
+            oauth2_accounts: HashMap::new(),
+            graph_oauth2_accounts: HashMap::new(),
+            ews_accounts: HashMap::new(),
+            ews_oauth2_accounts: HashMap::new(),
+            smtp_accounts,
+            smtp_write_enabled: true,
+            smtp_save_sent: global_save_sent,
+            smtp_connect_timeout_ms: 30_000,
+            smtp_send_timeout_ms: 300_000,
+            write_enabled: true,
+            connect_timeout_ms: 5_000,
+            greeting_timeout_ms: 5_000,
+            socket_timeout_ms: 15_000,
+            cursor_ttl_seconds: 600,
+            cursor_max_entries: 512,
+        }
+    }
+
+    #[test]
+    fn provider_auto_save_detection_matches_known_hosts() {
+        // Providers that save server-side (MCP must NOT append a copy).
+        assert!(provider_auto_saves_sent("smtp.gmail.com"));
+        assert!(provider_auto_saves_sent("smtp-relay.gmail.com"));
+        assert!(provider_auto_saves_sent("smtp.googlemail.com"));
+        assert!(provider_auto_saves_sent("smtp.zoho.com"));
+        assert!(provider_auto_saves_sent("smtp.zoho.eu"));
+        assert!(provider_auto_saves_sent("SMTP.ZOHO.COM")); // case-insensitive
+        // Providers that do NOT auto-save (MCP should append).
+        assert!(!provider_auto_saves_sent("smtp.office365.com"));
+        assert!(!provider_auto_saves_sent("smtp.sendgrid.net"));
+        assert!(!provider_auto_saves_sent("mail.midominio.cl"));
+    }
+
+    #[test]
+    fn should_save_sent_provider_aware_default_when_nothing_set() {
+        // Zoho/Gmail auto-save → MCP default false (no duplicate).
+        assert!(!cfg_with_smtp("smtp.zoho.com", None, None).should_save_sent("acct"));
+        assert!(!cfg_with_smtp("smtp.gmail.com", None, None).should_save_sent("acct"));
+        // Generic / Office 365 → MCP default true (or the copy is lost).
+        assert!(cfg_with_smtp("smtp.office365.com", None, None).should_save_sent("acct"));
+        assert!(cfg_with_smtp("mail.midominio.cl", None, None).should_save_sent("acct"));
+    }
+
+    #[test]
+    fn should_save_sent_per_account_override_beats_everything() {
+        // Zoho would default false, but explicit per-account true wins.
+        assert!(cfg_with_smtp("smtp.zoho.com", Some(true), Some(false)).should_save_sent("acct"));
+        // Generic would default true, but explicit per-account false wins.
+        assert!(
+            !cfg_with_smtp("mail.midominio.cl", Some(false), Some(true)).should_save_sent("acct")
+        );
+    }
+
+    #[test]
+    fn should_save_sent_global_override_beats_provider_default() {
+        // Global true forces save even on Zoho (when no per-account override).
+        assert!(cfg_with_smtp("smtp.zoho.com", None, Some(true)).should_save_sent("acct"));
+        // Global false suppresses save even on a generic host.
+        assert!(!cfg_with_smtp("mail.midominio.cl", None, Some(false)).should_save_sent("acct"));
+    }
+
+    #[test]
+    fn should_save_sent_unknown_account_is_false() {
+        assert!(!cfg_with_smtp("smtp.zoho.com", None, None).should_save_sent("nonexistent"));
+    }
 
     #[test]
     fn parse_bool_value_accepts_common_truthy_and_falsy_values() {

@@ -15,6 +15,35 @@
 
 Most email MCP servers only do IMAP reads. This one does **everything**: read, search, send, reply, forward, bulk operations, Microsoft Graph API, and Exchange Web Services — with real OAuth2, multi-account, and multi-provider support. Written in Rust for speed and safety.
 
+## What's New in v0.4.8
+
+- **`SAVE_SENT` ahora es por cuenta + con default según proveedor.** Antes,
+  guardar una copia del correo enviado en la carpeta Sent vía IMAP APPEND se
+  controlaba con un único flag global `MAIL_SMTP_SAVE_SENT`. El problema: los
+  proveedores que **ya guardan** el enviado server-side (Gmail, Zoho)
+  terminaban con **dos copias idénticas** en Sent, mientras que un SMTP
+  genérico u Office 365 (que **no** auto-guardan en envío SMTP) perdían la
+  copia si el flag estaba en `false`.
+- **Default provider-aware** (cuando no hay nada configurado):
+  - **Gmail** (`smtp.gmail.com`): guarda server-side y deduplica por
+    Message-ID → el MCP **no** appendea (`false`).
+  - **Zoho** (`smtp.zoho.com`): guarda server-side pero **no** deduplica →
+    el MCP **no** appendea (`false`), evitando el duplicado.
+  - **Office 365 / SMTP genérico**: **no** auto-guardan en envío SMTP → el
+    MCP **sí** appendea (`true`), o el enviado no quedaría en ningún lado.
+- **Override por cuenta**: `MAIL_SMTP_<ID>_SAVE_SENT=true|false` tiene
+  prioridad sobre todo. El global `MAIL_SMTP_SAVE_SENT` sigue funcionando
+  como override coarse (gana sobre el default por proveedor, pierde frente
+  al override por cuenta).
+- Precedencia: **por-cuenta** → **global** → **default por proveedor**.
+
+| Proveedor | Auto-guarda server-side | Default del MCP |
+|---|---|---|
+| Gmail | Sí (con dedupe) | `false` |
+| Zoho | Sí (sin dedupe) | `false` |
+| Office 365 (SMTP) | No | `true` |
+| SMTP genérico / relays | No | `true` |
+
 ## What's New in v0.4.7
 
 - **Fix crítico — `graph_send_message` perdía adjuntos silenciosamente en
