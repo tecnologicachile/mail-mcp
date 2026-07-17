@@ -101,6 +101,10 @@ pub struct ServerConfig {
     pub cursor_ttl_seconds: u64,
     /// Maximum number of cursors to retain (LRU eviction when exceeded)
     pub cursor_max_entries: usize,
+    /// Default directory where `imap_get_attachment` saves downloaded
+    /// attachments. `None` = fall back to the system temp dir. A per-call
+    /// `output_dir` argument overrides this.
+    pub attachment_download_dir: Option<String>,
 }
 
 impl ServerConfig {
@@ -181,6 +185,9 @@ impl ServerConfig {
             socket_timeout_ms: parse_u64_env("MAIL_IMAP_SOCKET_TIMEOUT_MS", 300_000)?,
             cursor_ttl_seconds: parse_u64_env("MAIL_IMAP_CURSOR_TTL_SECONDS", 600)?,
             cursor_max_entries: parse_usize_env("MAIL_IMAP_CURSOR_MAX_ENTRIES", 512)?,
+            attachment_download_dir: env::var("MAIL_ATTACHMENT_DOWNLOAD_DIR")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
         })
     }
 
@@ -779,6 +786,7 @@ mod tests {
             socket_timeout_ms: 15_000,
             cursor_ttl_seconds: 600,
             cursor_max_entries: 512,
+            attachment_download_dir: None,
         }
     }
 

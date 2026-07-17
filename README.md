@@ -15,6 +15,32 @@
 
 Most email MCP servers only do IMAP reads. This one does **everything**: read, search, send, reply, forward, bulk operations, Microsoft Graph API, and Exchange Web Services — with real OAuth2, multi-account, and multi-provider support. Written in Rust for speed and safety.
 
+## What's New in v0.4.9
+
+- **New tool `imap_get_attachment` — download a single attachment to disk.**
+  Until now the only ways to reach attachment bytes were `imap_get_message`
+  (which returns attachment *metadata* and optional extracted PDF *text*, never
+  the binary) and `imap_get_message_raw` (capped at 1 MB and base64-encoded
+  into the response). A 7 MB email with X-ray images could not be retrieved at
+  all — over the cap, and dumping it into the response would blow up the model's
+  context anyway.
+- **How it works:** call `imap_get_attachment` with the `message_id` plus a
+  selector — either `part_id` (the value `imap_get_message` reports for each
+  attachment) or `filename`. The server fetches the full message (no size cap on
+  the server side), extracts and decodes just that one part, and **writes it to
+  disk**, returning `{ file_path, filename, content_type, part_id, size_bytes }`.
+  The binary never enters the response, so context stays small. The saved path
+  feeds straight into a local reader (e.g. an image-description tool or a PDF
+  reader).
+- **Where files land:** `output_dir` argument if given, else the
+  `MAIL_ATTACHMENT_DOWNLOAD_DIR` environment variable, else the system temp dir.
+  Filenames are sanitized (basename only, control characters stripped) to
+  prevent path traversal, and prefixed with the message UID and part id to avoid
+  collisions.
+- **Optional inline base64:** set `include_base64: true` to also get the bytes
+  in the response, but only when the attachment is at most `max_inline_bytes`
+  (default 256 KiB). Off by default.
+
 ## What's New in v0.4.8
 
 - **`SAVE_SENT` is now per-account with a provider-aware default.**
@@ -298,9 +324,9 @@ Microsoft blocks SMTP on personal accounts. Use Graph API instead:
 
 Get your token in 1 minute with device code flow. See [Account Setup Guide](docs/account-setup.md).
 
-## 30 MCP Tools
+## 31 MCP Tools
 
-### Read (8 tools)
+### Read (9 tools)
 
 | Tool | What it does |
 |------|-------------|
@@ -312,6 +338,7 @@ Get your token in 1 minute with device code flow. See [Account Setup Guide](docs
 | `imap_search_messages` | Search with cursor pagination |
 | `imap_get_message` | Parsed message (text, HTML, attachments) |
 | `imap_get_message_raw` | RFC822 source |
+| `imap_get_attachment` | Download one attachment to disk (bypasses the raw size cap) |
 
 ### Write (11 tools)
 
@@ -360,6 +387,13 @@ Send files with any send tool. Two modes:
 ```
 
 Filename and MIME type are auto-detected from the file path. Reply with `include_original_attachments: true` to forward original attachments.
+
+**Downloading** an attachment from a received message: use `imap_get_attachment`
+with the `message_id` and a `part_id` (from `imap_get_message`) or `filename`.
+It writes the decoded file to disk and returns the path — no size cap, and the
+binary stays out of the response. Set the default download directory with
+`MAIL_ATTACHMENT_DOWNLOAD_DIR` (falls back to the system temp dir), or pass
+`output_dir` per call.
 
 ### Bulk Operations (2 tools)
 

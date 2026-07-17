@@ -753,6 +753,7 @@ mod tests {
             socket_timeout_ms: 15_000,
             cursor_ttl_seconds: 600,
             cursor_max_entries: 128,
+            attachment_download_dir: None,
         }
     }
 

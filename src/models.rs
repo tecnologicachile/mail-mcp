@@ -262,6 +262,39 @@ pub struct GetMessageRawInput {
     pub max_bytes: usize,
 }
 
+/// Input: download a single attachment
+///
+/// Used by `imap_get_attachment`. Selects one attachment part (by `part_id`
+/// as reported by `imap_get_message`, or by `filename`) and writes its decoded
+/// bytes to disk, returning the path. Large binaries (images, PDFs) never enter
+/// the response — only the file path does, unless `include_base64` is set for a
+/// small attachment.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct GetAttachmentInput {
+    /// Account identifier (defaults to `"default"`)
+    #[serde(default = "default_account_id")]
+    pub account_id: String,
+    /// Stable message identifier
+    pub message_id: String,
+    /// MIME part id to fetch (e.g. `1.2`), as shown by `imap_get_message`.
+    /// Takes precedence over `filename` when both are given.
+    pub part_id: Option<String>,
+    /// Attachment filename to fetch (case-insensitive). Used when `part_id`
+    /// is omitted.
+    pub filename: Option<String>,
+    /// Directory to save the attachment into. Overrides the server default
+    /// (`MAIL_ATTACHMENT_DOWNLOAD_DIR`, else the system temp dir).
+    pub output_dir: Option<String>,
+    /// Also return the raw bytes as base64 in the response, but only if the
+    /// attachment is at most `max_inline_bytes`. Off by default to protect the
+    /// context window.
+    #[serde(default)]
+    pub include_base64: bool,
+    /// Size ceiling (bytes) for inline base64. Ignored unless `include_base64`
+    /// is `true`. Defaults to 262144 (256 KiB).
+    pub max_inline_bytes: Option<usize>,
+}
+
 /// Input: update message flags
 ///
 /// Used by `imap_update_message_flags`. Requires at least one flag operation.

@@ -188,6 +188,78 @@ fn attachment_filename(
         .or_else(|| part.ctype.params.get("name").cloned())
 }
 
+/// A single attachment with its decoded (binary) bytes.
+///
+/// Used by `imap_get_attachment` to hand a specific part's content to the
+/// caller without loading the whole message into the response. The `part_id`
+/// uses the same numbering scheme as `parse_message` (e.g. `1`, `1.2`), so a
+/// caller can select an attachment by the `part_id` it saw in
+/// `imap_get_message`.
+#[derive(Debug, Clone)]
+pub struct ExtractedAttachment {
+    /// Filename if present in Content-Disposition or Content-Type
+    pub filename: Option<String>,
+    /// MIME content type (e.g., `application/pdf`, `image/jpeg`)
+    pub content_type: String,
+    /// Part ID for MIME structure (matches `parse_message`)
+    pub part_id: String,
+    /// Decoded attachment bytes (transfer-encoding already undone)
+    pub bytes: Vec<u8>,
+}
+
+/// Parse an RFC822 message and return every attachment part with its decoded
+/// bytes.
+///
+/// Part IDs match those returned by [`parse_message`], so a caller can select
+/// an attachment by the `part_id` seen in `imap_get_message`.
+///
+/// # Errors
+///
+/// - `Internal` if `mailparse` fails or an attachment body cannot be decoded
+pub fn collect_attachments(raw: &[u8]) -> AppResult<Vec<ExtractedAttachment>> {
+    let parsed = mailparse::parse_mail(raw)
+        .map_err(|e| AppError::Internal(format!("failed to parse RFC822 message: {e}")))?;
+    let mut out = Vec::new();
+    walk_attachment_parts(&parsed, "1".to_owned(), &mut out)?;
+    Ok(out)
+}
+
+/// Walk MIME parts collecting attachment bodies with decoded bytes.
+///
+/// Mirrors [`walk_parts`]'s part-id numbering and attachment detection so the
+/// `part_id` values line up with what `imap_get_message` reports.
+fn walk_attachment_parts(
+    part: &ParsedMail<'_>,
+    part_id: String,
+    out: &mut Vec<ExtractedAttachment>,
+) -> AppResult<()> {
+    if part.subparts.is_empty() {
+        let ctype = part.ctype.mimetype.to_ascii_lowercase();
+        let disp = part.get_content_disposition();
+        let filename = attachment_filename(part, &disp.params);
+        let is_attachment = disp.disposition == DispositionType::Attachment || filename.is_some();
+
+        if is_attachment {
+            let bytes = part
+                .get_body_raw()
+                .map_err(|e| AppError::Internal(format!("failed decoding attachment body: {e}")))?;
+            out.push(ExtractedAttachment {
+                filename,
+                content_type: ctype,
+                part_id,
+                bytes,
+            });
+        }
+        return Ok(());
+    }
+
+    for (idx, sub) in part.subparts.iter().enumerate() {
+        let next_id = format!("{part_id}.{}", idx + 1);
+        walk_attachment_parts(sub, next_id, out)?;
+    }
+    Ok(())
+}
+
 /// Return headers, either curated or all
 ///
 /// If `include_all=true`, returns all headers. Otherwise, returns only
@@ -315,5 +387,27 @@ mod tests {
         assert_eq!(parsed.to.as_deref(), Some("user@example.com"));
         assert_eq!(parsed.body_text.as_deref(), Some("Hello there"));
         assert!(parsed.attachments.is_empty());
+    }
+
+    /// Tests that `collect_attachments` decodes a base64 part and that its
+    /// `part_id` matches what `parse_message` reports for the same message.
+    #[test]
+    fn collect_attachments_decodes_and_matches_part_ids() {
+        use super::collect_attachments;
+        // multipart/mixed with a text body (1.1) and a base64 attachment (1.2)
+        let raw = b"From: a@example.com\r\nTo: b@example.com\r\nSubject: With file\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=BND\r\n\r\n--BND\r\nContent-Type: text/plain\r\n\r\nbody text\r\n--BND\r\nContent-Type: application/pdf; name=\"report.pdf\"\r\nContent-Disposition: attachment; filename=\"report.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\naGVsbG8gd29ybGQ=\r\n--BND--\r\n";
+
+        let parsed = parse_message(raw, 2000, false, false, 10000).expect("parse ok");
+        assert_eq!(parsed.attachments.len(), 1);
+        let meta_part_id = parsed.attachments[0].part_id.clone();
+
+        let atts = collect_attachments(raw).expect("collect ok");
+        assert_eq!(atts.len(), 1);
+        let att = &atts[0];
+        assert_eq!(att.filename.as_deref(), Some("report.pdf"));
+        assert_eq!(att.content_type, "application/pdf");
+        assert_eq!(att.bytes, b"hello world");
+        // The part_id from collect_attachments lines up with parse_message's.
+        assert_eq!(att.part_id, meta_part_id);
     }
 }

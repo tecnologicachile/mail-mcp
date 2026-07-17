@@ -1,8 +1,9 @@
 //! MCP server implementation with tool handlers
 //!
-//! Implements the `ServerHandler` trait and registers 18 MCP tools. Handles
+//! Implements the `ServerHandler` trait and registers 19 MCP tools. Handles
 //! input validation, business logic orchestration, and response formatting.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -24,11 +25,11 @@ use crate::mime;
 use crate::models::{
     AccountInfo, AccountOnlyInput, AppendMessageInput, AttachmentInput, BulkDeleteInput,
     BulkMoveInput, BulkUpdateFlagsInput, CopyMessageInput, CreateMailboxInput, DeleteMailboxInput,
-    DeleteMessageInput, GetMessageInput, GetMessageRawInput, GraphSendMessageInput, MailboxInfo,
-    MailboxStatusInfo, MailboxStatusInput, MessageDetail, MessageSummary, Meta, MoveMessageInput,
-    RenameMailboxInput, SearchAndDeleteInput, SearchAndMoveInput, SearchMessagesInput,
-    SmtpForwardMessageInput, SmtpReplyMessageInput, SmtpSendMessageInput, SmtpVerifyAccountInput,
-    ToolEnvelope, UpdateMessageFlagsInput,
+    DeleteMessageInput, GetAttachmentInput, GetMessageInput, GetMessageRawInput,
+    GraphSendMessageInput, MailboxInfo, MailboxStatusInfo, MailboxStatusInput, MessageDetail,
+    MessageSummary, Meta, MoveMessageInput, RenameMailboxInput, SearchAndDeleteInput,
+    SearchAndMoveInput, SearchMessagesInput, SmtpForwardMessageInput, SmtpReplyMessageInput,
+    SmtpSendMessageInput, SmtpVerifyAccountInput, ToolEnvelope, UpdateMessageFlagsInput,
 };
 use crate::pagination::{CursorEntry, CursorStore};
 use crate::smtp;
@@ -327,6 +328,29 @@ impl MailImapServer {
             self.get_message_raw_impl(input)
                 .await
                 .map(|data| ("Raw message retrieved".to_owned(), data)),
+        )
+    }
+
+    /// Tool: Download a single attachment to disk
+    ///
+    /// Fetches one attachment part (by `part_id` or `filename`) and writes its
+    /// decoded bytes to a file, returning the path. Bypasses the raw-message
+    /// size cap and keeps large binaries out of the response.
+    #[tool(
+        name = "imap_get_attachment",
+        description = "Download one attachment to disk"
+    )]
+    async fn get_attachment(
+        &self,
+        Parameters(input): Parameters<GetAttachmentInput>,
+    ) -> Result<Json<ToolEnvelope<serde_json::Value>>, ErrorData> {
+        let started = Instant::now();
+        finalize_tool(
+            started,
+            "imap_get_attachment",
+            self.get_attachment_impl(input)
+                .await
+                .map(|data| ("Attachment downloaded".to_owned(), data)),
         )
     }
 
@@ -1558,6 +1582,156 @@ impl MailImapServer {
             "issues": issues,
             "account_id": input.account_id,
             "message": detail,
+        }))
+    }
+
+    async fn get_attachment_impl(&self, input: GetAttachmentInput) -> AppResult<serde_json::Value> {
+        validate_account_id(&input.account_id)?;
+        if input.part_id.is_none() && input.filename.is_none() {
+            return Err(AppError::InvalidInput(
+                "either part_id or filename is required".to_owned(),
+            ));
+        }
+        if input.max_inline_bytes.is_some() && !input.include_base64 {
+            return Err(AppError::InvalidInput(
+                "max_inline_bytes requires include_base64=true".to_owned(),
+            ));
+        }
+        let max_inline_bytes = input.max_inline_bytes.unwrap_or(262_144);
+        validate_chars(max_inline_bytes, 1, 10_000_000, "max_inline_bytes")?;
+
+        let msg_id = parse_and_validate_message_id(&input.account_id, &input.message_id)?;
+        let encoded_message_id = msg_id.encode();
+
+        let account = self.config.get_account(&input.account_id)?;
+        let mut issues = Vec::new();
+        let mut session =
+            match imap::connect_authenticated(&self.config, account, self.token_manager.as_deref())
+                .await
+            {
+                Ok(session) => session,
+                Err(error) => {
+                    issues.push(
+                        ToolIssue::from_error("connect_authenticated", &error)
+                            .with_message_id(&encoded_message_id),
+                    );
+                    log_runtime_issues(
+                        "imap_get_attachment",
+                        "failed",
+                        &input.account_id,
+                        Some(&msg_id.mailbox),
+                        &issues,
+                    );
+                    return Ok(serde_json::json!({
+                        "status": "failed",
+                        "issues": issues,
+                        "account_id": input.account_id,
+                        "message_id": encoded_message_id,
+                        "file_path": serde_json::Value::Null,
+                    }));
+                }
+            };
+        ensure_uidvalidity_matches_readonly(&self.config, &mut session, &msg_id).await?;
+
+        let raw = match imap::fetch_raw_message(&self.config, &mut session, msg_id.uid).await {
+            Ok(raw) => raw,
+            Err(error) => {
+                issues.push(
+                    ToolIssue::from_error("fetch_raw_message", &error)
+                        .with_uid(msg_id.uid)
+                        .with_message_id(&encoded_message_id),
+                );
+                log_runtime_issues(
+                    "imap_get_attachment",
+                    "failed",
+                    &input.account_id,
+                    Some(&msg_id.mailbox),
+                    &issues,
+                );
+                return Ok(serde_json::json!({
+                    "status": "failed",
+                    "issues": issues,
+                    "account_id": input.account_id,
+                    "message_id": encoded_message_id,
+                    "file_path": serde_json::Value::Null,
+                }));
+            }
+        };
+
+        let attachments = mime::collect_attachments(&raw)?;
+        let selected = select_attachment(
+            &attachments,
+            input.part_id.as_deref(),
+            input.filename.as_deref(),
+        );
+        let Some(att) = selected else {
+            return Err(AppError::NotFound(format!(
+                "no attachment matched the given selector; message has {} attachment(s)",
+                attachments.len()
+            )));
+        };
+
+        let dir = input
+            .output_dir
+            .clone()
+            .or_else(|| self.config.attachment_download_dir.clone())
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            AppError::Internal(format!("failed creating output dir {}: {e}", dir.display()))
+        })?;
+
+        let safe_name = sanitize_attachment_filename(att.filename.as_deref(), &att.part_id);
+        let file_name = format!(
+            "{}_{}_{}",
+            msg_id.uid,
+            att.part_id.replace('.', "-"),
+            safe_name
+        );
+        let path = dir.join(&file_name);
+        let size_bytes = att.bytes.len();
+        std::fs::write(&path, &att.bytes).map_err(|e| {
+            AppError::Internal(format!(
+                "failed writing attachment to {}: {e}",
+                path.display()
+            ))
+        })?;
+
+        let inline_base64 = if input.include_base64 && size_bytes <= max_inline_bytes {
+            Some(encode_raw_source_base64(&att.bytes))
+        } else {
+            None
+        };
+        let base64_omitted_reason = if input.include_base64 && inline_base64.is_none() {
+            Some(format!(
+                "attachment size {size_bytes} exceeds max_inline_bytes {max_inline_bytes}"
+            ))
+        } else {
+            None
+        };
+        let base64_encoding = inline_base64.as_ref().map(|_| "base64");
+
+        log_runtime_issues(
+            "imap_get_attachment",
+            "ok",
+            &input.account_id,
+            Some(&msg_id.mailbox),
+            &issues,
+        );
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "issues": issues,
+            "account_id": input.account_id,
+            "message_id": encoded_message_id,
+            "file_path": path.display().to_string(),
+            "filename": att.filename,
+            "content_type": att.content_type,
+            "part_id": att.part_id,
+            "size_bytes": size_bytes,
+            "content_base64": inline_base64,
+            "content_base64_encoding": base64_encoding,
+            "base64_omitted_reason": base64_omitted_reason,
         }))
     }
 
@@ -4203,6 +4377,52 @@ fn encode_raw_source_base64(raw: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(raw)
 }
 
+/// Select one attachment by `part_id` (exact) or, failing that, by `filename`
+/// (case-insensitive). `part_id` takes precedence when both are supplied.
+fn select_attachment<'a>(
+    attachments: &'a [mime::ExtractedAttachment],
+    part_id: Option<&str>,
+    filename: Option<&str>,
+) -> Option<&'a mime::ExtractedAttachment> {
+    if let Some(pid) = part_id {
+        return attachments.iter().find(|a| a.part_id == pid);
+    }
+    if let Some(name) = filename {
+        return attachments.iter().find(|a| {
+            a.filename
+                .as_deref()
+                .is_some_and(|f| f.eq_ignore_ascii_case(name))
+        });
+    }
+    None
+}
+
+/// Derive a safe on-disk file name from an attachment's declared filename.
+///
+/// Strips any directory components and control characters to prevent path
+/// traversal, and falls back to a part-id-based name when the attachment
+/// carries no usable filename.
+fn sanitize_attachment_filename(filename: Option<&str>, part_id: &str) -> String {
+    let raw = filename.unwrap_or("").trim();
+    // Keep only the basename — drop anything up to the last path separator.
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or("").trim();
+    let cleaned: String = base
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_control() || ch == '/' || ch == '\\' || ch == '\0' {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches('.').trim();
+    if cleaned.is_empty() {
+        return format!("attachment-{}", part_id.replace('.', "-"));
+    }
+    cleaned.chars().take(200).collect()
+}
+
 /// Validate bulk message ID list (non-empty, within limit)
 fn validate_bulk_ids(ids: &[String]) -> AppResult<()> {
     if ids.is_empty() {
@@ -4269,8 +4489,60 @@ fn parse_bulk_message_ids(account_id: &str, message_ids: &[String]) -> AppResult
 mod tests {
     use super::{
         encode_raw_source_base64, escape_imap_quoted, is_sent_folder_name,
-        validate_email_no_wrapper_leak, validate_flag, validate_mailbox, validate_search_text,
+        sanitize_attachment_filename, select_attachment, validate_email_no_wrapper_leak,
+        validate_flag, validate_mailbox, validate_search_text,
     };
+    use crate::mime::ExtractedAttachment;
+
+    fn att(part_id: &str, filename: Option<&str>) -> ExtractedAttachment {
+        ExtractedAttachment {
+            filename: filename.map(str::to_owned),
+            content_type: "application/octet-stream".to_owned(),
+            part_id: part_id.to_owned(),
+            bytes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn select_attachment_prefers_part_id_then_filename() {
+        let atts = vec![att("1.2", Some("a.pdf")), att("1.3", Some("B.PNG"))];
+
+        // part_id exact match wins even when a filename is also given.
+        let hit = select_attachment(&atts, Some("1.3"), Some("a.pdf")).expect("part match");
+        assert_eq!(hit.part_id, "1.3");
+
+        // filename match is case-insensitive when no part_id is given.
+        let hit = select_attachment(&atts, None, Some("b.png")).expect("name match");
+        assert_eq!(hit.part_id, "1.3");
+
+        // no match returns None.
+        assert!(select_attachment(&atts, Some("9.9"), None).is_none());
+        assert!(select_attachment(&atts, None, Some("missing.txt")).is_none());
+    }
+
+    #[test]
+    fn sanitize_attachment_filename_blocks_traversal_and_empties() {
+        // Directory components are stripped to the basename.
+        assert_eq!(
+            sanitize_attachment_filename(Some("../../etc/passwd"), "1.2"),
+            "passwd"
+        );
+        assert_eq!(
+            sanitize_attachment_filename(Some("C:\\Windows\\evil.exe"), "1.2"),
+            "evil.exe"
+        );
+        // Control characters become underscores.
+        assert_eq!(
+            sanitize_attachment_filename(Some("a\tb\nc.txt"), "1.2"),
+            "a_b_c.txt"
+        );
+        // Missing/blank filename falls back to a part-id-based name.
+        assert_eq!(sanitize_attachment_filename(None, "1.2"), "attachment-1-2");
+        assert_eq!(
+            sanitize_attachment_filename(Some("   "), "1.3"),
+            "attachment-1-3"
+        );
+    }
 
     #[test]
     fn sent_folder_detection_covers_common_providers() {
