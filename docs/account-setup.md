@@ -145,6 +145,42 @@ MAIL_SMTP_GMAIL_SECURE=starttls
 
 ---
 
+## Apple iCloud
+
+iCloud Mail requires an **App-Specific Password** for IMAP/SMTP access (regular Apple ID password is blocked for third-party clients).
+
+**Prerequisites:** Two-factor authentication (2FA) must be enabled on the Apple ID.
+
+**Step 1 — Create an App-Specific Password:**
+1. Go to: **https://appleid.apple.com/account/manage**
+2. Sign in, then open **Sign-In and Security** → **App-Specific Passwords**
+3. Generate a password (name it e.g. "mail-mcp")
+4. Copy the password — you will not see it again
+
+**Step 2 — Configure:**
+
+Use the full iCloud email as the username (`you@icloud.com`; also works for `@me.com` / `@mac.com`).
+
+```env
+MAIL_IMAP_ICLOUD_HOST=imap.mail.me.com
+MAIL_IMAP_ICLOUD_PORT=993
+MAIL_IMAP_ICLOUD_USER=you@icloud.com
+MAIL_IMAP_ICLOUD_PASS=your-app-specific-password
+MAIL_IMAP_ICLOUD_SECURE=true
+
+MAIL_SMTP_ICLOUD_HOST=smtp.mail.me.com
+MAIL_SMTP_ICLOUD_PORT=587
+MAIL_SMTP_ICLOUD_USER=you@icloud.com
+MAIL_SMTP_ICLOUD_PASS=your-app-specific-password
+MAIL_SMTP_ICLOUD_SECURE=starttls
+```
+
+**Folder names:** iCloud uses `Sent Messages`, `Deleted Messages`, `Junk`, `Drafts`, and `Archive` (not Gmail-style `Sent` / `Trash`). Short aliases such as `Sent` and `Trash` resolve to the provider folder when listing/selecting mailboxes.
+
+**Sent mail:** Third-party SMTP to iCloud does **not** auto-file a copy in Sent. Leave `MAIL_SMTP_SAVE_SENT` at its default (`true`) so the server APPENDs the sent message to `Sent Messages` after SMTP succeeds.
+
+---
+
 ## Zoho Mail
 
 Zoho supports standard password authentication for IMAP and SMTP.
