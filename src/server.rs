@@ -869,6 +869,13 @@ impl MailImapServer {
                     "smtp": "App Password, same as IMAP",
                     "sending": "smtp_send_message"
                 },
+                "icloud": {
+                    "description": "Apple iCloud Mail (@icloud.com, @me.com, @mac.com)",
+                    "imap": "App-Specific Password (https://appleid.apple.com/account/manage → App-Specific Passwords, requires 2FA). Host: imap.mail.me.com:993",
+                    "smtp": "App-Specific Password. Host: smtp.mail.me.com:587 SECURE=starttls",
+                    "sending": "smtp_send_message (third-party SMTP does not auto-file Sent; leave MAIL_SMTP_SAVE_SENT default on)",
+                    "folders": "Sent Messages, Deleted Messages, Junk, Drafts, Archive — short aliases Sent/Trash/Junk/Drafts also resolve"
+                },
                 "zoho": {
                     "description": "Zoho Mail",
                     "imap": "Standard password",
@@ -910,6 +917,7 @@ impl MailImapServer {
                 "microsoft": "https://account.live.com/proofs/AppPassword (requires 2FA)",
                 "microsoft_365": "https://mysignins.microsoft.com/security-info",
                 "gmail": "https://myaccount.google.com/apppasswords (requires 2FA)",
+                "icloud": "https://appleid.apple.com/account/manage (Sign-In and Security → App-Specific Passwords, requires 2FA)",
                 "zoho": "https://accounts.zoho.com/home#security/security_mysessions"
             },
             "full_docs": "See docs/account-setup.md for complete step-by-step guide"
@@ -1203,7 +1211,7 @@ impl MailImapServer {
 
     async fn search_messages_impl(
         &self,
-        input: SearchMessagesInput,
+        mut input: SearchMessagesInput,
     ) -> AppResult<SearchResultData> {
         validate_search_input(&input)?;
         validate_account_id(&input.account_id)?;
@@ -1240,6 +1248,37 @@ impl MailImapServer {
                     });
                 }
             };
+        // Resolve role aliases (Sent → Sent Messages, Trash → Deleted Messages, …)
+        // so response mailbox / message_ids / cursors use the provider's real name.
+        input.mailbox =
+            match imap::resolve_mailbox_name(&self.config, &mut session, &input.mailbox).await {
+                Ok(mailbox) => mailbox,
+                Err(error) => {
+                    let issue = ToolIssue::from_error("resolve_mailbox_name", &error);
+                    let issues = vec![issue];
+                    log_runtime_issues(
+                        "imap_search_messages",
+                        "failed",
+                        &input.account_id,
+                        Some(&input.mailbox),
+                        &issues,
+                    );
+                    return Ok(SearchResultData {
+                        status: "failed".to_owned(),
+                        issues,
+                        next_action: next_action_list_mailboxes(&input.account_id),
+                        account_id: input.account_id,
+                        mailbox: input.mailbox,
+                        total: 0,
+                        attempted: 0,
+                        returned: 0,
+                        failed: 0,
+                        messages: Vec::new(),
+                        next_cursor: None,
+                        has_more: false,
+                    });
+                }
+            };
         let uidvalidity =
             match imap::select_mailbox_readonly(&self.config, &mut session, &input.mailbox).await {
                 Ok(uidvalidity) => uidvalidity,
@@ -1256,7 +1295,7 @@ impl MailImapServer {
                     return Ok(SearchResultData {
                         status: "failed".to_owned(),
                         issues,
-                        next_action: next_action_retry_verify(&input.account_id),
+                        next_action: next_action_list_mailboxes(&input.account_id),
                         account_id: input.account_id,
                         mailbox: input.mailbox,
                         total: 0,
@@ -1973,6 +2012,9 @@ impl MailImapServer {
         let mut steps_succeeded = 0usize;
         let mut steps_attempted = 0usize;
 
+        // Resolved destination (same-account path); cross-account resolves on dest session.
+        let mut destination_mailbox = input.destination_mailbox.clone();
+
         if destination_account_id == input.account_id {
             let account = self.config.get_account(&input.account_id)?;
             steps_attempted += 1;
@@ -2005,7 +2047,7 @@ impl MailImapServer {
                         "source_account_id": input.account_id,
                         "destination_account_id": destination_account_id,
                         "source_mailbox": msg_id.mailbox,
-                        "destination_mailbox": input.destination_mailbox,
+                        "destination_mailbox": destination_mailbox,
                         "message_id": encoded_message_id,
                         "new_message_id": serde_json::Value::Null,
                         "steps_attempted": steps_attempted,
@@ -2013,13 +2055,16 @@ impl MailImapServer {
                     }));
                 }
             };
+            destination_mailbox =
+                imap::resolve_mailbox_name(&self.config, &mut session, &destination_mailbox)
+                    .await?;
             ensure_uidvalidity_matches_readwrite(&self.config, &mut session, &msg_id).await?;
             steps_attempted += 1;
             if let Err(error) = imap::uid_copy(
                 &self.config,
                 &mut session,
                 msg_id.uid,
-                input.destination_mailbox.as_str(),
+                destination_mailbox.as_str(),
             )
             .await
             {
@@ -2063,7 +2108,7 @@ impl MailImapServer {
                         "source_account_id": input.account_id,
                         "destination_account_id": destination_account_id,
                         "source_mailbox": msg_id.mailbox,
-                        "destination_mailbox": input.destination_mailbox,
+                        "destination_mailbox": destination_mailbox,
                         "message_id": encoded_message_id,
                         "new_message_id": serde_json::Value::Null,
                         "steps_attempted": steps_attempted,
@@ -2099,7 +2144,7 @@ impl MailImapServer {
                         "source_account_id": input.account_id,
                         "destination_account_id": destination_account_id,
                         "source_mailbox": msg_id.mailbox,
-                        "destination_mailbox": input.destination_mailbox,
+                        "destination_mailbox": destination_mailbox,
                         "message_id": encoded_message_id,
                         "new_message_id": serde_json::Value::Null,
                         "steps_attempted": steps_attempted,
@@ -2140,7 +2185,7 @@ impl MailImapServer {
                         "source_account_id": input.account_id,
                         "destination_account_id": destination_account_id,
                         "source_mailbox": msg_id.mailbox,
-                        "destination_mailbox": input.destination_mailbox,
+                        "destination_mailbox": destination_mailbox,
                         "message_id": encoded_message_id,
                         "new_message_id": serde_json::Value::Null,
                         "steps_attempted": steps_attempted,
@@ -2148,11 +2193,17 @@ impl MailImapServer {
                     }));
                 }
             };
+            destination_mailbox = imap::resolve_mailbox_name(
+                &self.config,
+                &mut destination_session,
+                &destination_mailbox,
+            )
+            .await?;
             steps_attempted += 1;
             if let Err(error) = imap::append(
                 &self.config,
                 &mut destination_session,
-                input.destination_mailbox.as_str(),
+                destination_mailbox.as_str(),
                 raw.as_slice(),
             )
             .await
@@ -2181,7 +2232,7 @@ impl MailImapServer {
             "source_account_id": input.account_id,
             "destination_account_id": destination_account_id,
             "source_mailbox": msg_id.mailbox,
-            "destination_mailbox": input.destination_mailbox,
+            "destination_mailbox": destination_mailbox,
             "message_id": encoded_message_id,
             "new_message_id": serde_json::Value::Null,
             "steps_attempted": steps_attempted,
@@ -2201,6 +2252,7 @@ impl MailImapServer {
         let mut issues = Vec::new();
         let mut steps_attempted = 0usize;
         let mut steps_succeeded = 0usize;
+        let mut destination_mailbox = input.destination_mailbox.clone();
 
         steps_attempted += 1;
         let mut session =
@@ -2228,7 +2280,7 @@ impl MailImapServer {
                         "issues": issues,
                         "account_id": input.account_id,
                         "source_mailbox": msg_id.mailbox,
-                        "destination_mailbox": input.destination_mailbox,
+                        "destination_mailbox": destination_mailbox,
                         "message_id": encoded_message_id,
                         "new_message_id": serde_json::Value::Null,
                         "steps_attempted": steps_attempted,
@@ -2236,6 +2288,8 @@ impl MailImapServer {
                     }));
                 }
             };
+        destination_mailbox =
+            imap::resolve_mailbox_name(&self.config, &mut session, &destination_mailbox).await?;
         ensure_uidvalidity_matches_readwrite(&self.config, &mut session, &msg_id).await?;
 
         steps_attempted += 1;
@@ -2263,7 +2317,7 @@ impl MailImapServer {
                     "issues": issues,
                     "account_id": input.account_id,
                     "source_mailbox": msg_id.mailbox,
-                    "destination_mailbox": input.destination_mailbox,
+                    "destination_mailbox": destination_mailbox,
                     "message_id": encoded_message_id,
                     "new_message_id": serde_json::Value::Null,
                     "steps_attempted": steps_attempted,
@@ -2278,7 +2332,7 @@ impl MailImapServer {
                 &self.config,
                 &mut session,
                 msg_id.uid,
-                input.destination_mailbox.as_str(),
+                destination_mailbox.as_str(),
             )
             .await
             {
@@ -2296,7 +2350,7 @@ impl MailImapServer {
                 &self.config,
                 &mut session,
                 msg_id.uid,
-                input.destination_mailbox.as_str(),
+                destination_mailbox.as_str(),
             )
             .await
             {
@@ -2363,7 +2417,7 @@ impl MailImapServer {
             "issues": issues,
             "account_id": input.account_id,
             "source_mailbox": msg_id.mailbox,
-            "destination_mailbox": input.destination_mailbox,
+            "destination_mailbox": destination_mailbox,
             "message_id": encoded_message_id,
             "new_message_id": serde_json::Value::Null,
             "steps_attempted": steps_attempted,
@@ -2544,11 +2598,13 @@ impl MailImapServer {
         let mut session =
             imap::connect_authenticated(&self.config, account, self.token_manager.as_deref())
                 .await?;
+        let mailbox =
+            imap::resolve_mailbox_name(&self.config, &mut session, &input.mailbox).await?;
         let (messages, unseen, recent) =
-            imap::mailbox_status(&self.config, &mut session, &input.mailbox).await?;
+            imap::mailbox_status(&self.config, &mut session, &mailbox).await?;
 
         let status_info = MailboxStatusInfo {
-            name: input.mailbox.clone(),
+            name: mailbox,
             messages,
             unseen,
             recent,
@@ -2596,9 +2652,15 @@ impl MailImapServer {
             imap::connect_authenticated(&self.config, account, self.token_manager.as_deref())
                 .await?;
 
+        let source_mailbox =
+            imap::resolve_mailbox_name(&self.config, &mut session, &input.mailbox).await?;
+        let destination_mailbox =
+            imap::resolve_mailbox_name(&self.config, &mut session, &input.destination_mailbox)
+                .await?;
+
         // Search (read-only SELECT via EXAMINE)
         let uidvalidity =
-            imap::select_mailbox_readonly(&self.config, &mut session, &input.mailbox).await?;
+            imap::select_mailbox_readonly(&self.config, &mut session, &source_mailbox).await?;
         let query = build_search_query(&search_input)?;
         let all_uids = imap::uid_search(&self.config, &mut session, &query).await?;
 
@@ -2607,8 +2669,8 @@ impl MailImapServer {
             return Ok(serde_json::json!({
                 "status": "ok",
                 "account_id": input.account_id,
-                "source_mailbox": input.mailbox,
-                "destination_mailbox": input.destination_mailbox,
+                "source_mailbox": source_mailbox,
+                "destination_mailbox": destination_mailbox,
                 "total_matched": 0,
                 "moved_count": 0,
                 "has_more": false,
@@ -2625,7 +2687,7 @@ impl MailImapServer {
         // Need read-write SELECT for MOVE; re-open the mailbox
         // (async-imap requires re-SELECT after EXAMINE)
         let rw_uidvalidity =
-            imap::select_mailbox_readwrite(&self.config, &mut session, &input.mailbox).await?;
+            imap::select_mailbox_readwrite(&self.config, &mut session, &source_mailbox).await?;
         if rw_uidvalidity != uidvalidity {
             return Err(AppError::Conflict(
                 "UIDVALIDITY changed between search and move".to_owned(),
@@ -2634,21 +2696,9 @@ impl MailImapServer {
 
         let caps = imap::capabilities(&self.config, &mut session).await?;
         if caps.has_str("MOVE") {
-            imap::uid_move_bulk(
-                &self.config,
-                &mut session,
-                &uid_set,
-                &input.destination_mailbox,
-            )
-            .await?;
+            imap::uid_move_bulk(&self.config, &mut session, &uid_set, &destination_mailbox).await?;
         } else {
-            imap::uid_copy_bulk(
-                &self.config,
-                &mut session,
-                &uid_set,
-                &input.destination_mailbox,
-            )
-            .await?;
+            imap::uid_copy_bulk(&self.config, &mut session, &uid_set, &destination_mailbox).await?;
             imap::uid_store_bulk(
                 &self.config,
                 &mut session,
@@ -2665,8 +2715,8 @@ impl MailImapServer {
         Ok(serde_json::json!({
             "status": "ok",
             "account_id": input.account_id,
-            "source_mailbox": input.mailbox,
-            "destination_mailbox": input.destination_mailbox,
+            "source_mailbox": source_mailbox,
+            "destination_mailbox": destination_mailbox,
             "total_matched": total_matched,
             "moved_count": moved_count,
             "remaining": remaining,
@@ -2712,8 +2762,11 @@ impl MailImapServer {
             imap::connect_authenticated(&self.config, account, self.token_manager.as_deref())
                 .await?;
 
+        let mailbox =
+            imap::resolve_mailbox_name(&self.config, &mut session, &input.mailbox).await?;
+
         let uidvalidity =
-            imap::select_mailbox_readonly(&self.config, &mut session, &input.mailbox).await?;
+            imap::select_mailbox_readonly(&self.config, &mut session, &mailbox).await?;
         let query = build_search_query(&search_input)?;
         let all_uids = imap::uid_search(&self.config, &mut session, &query).await?;
 
@@ -2722,7 +2775,7 @@ impl MailImapServer {
             return Ok(serde_json::json!({
                 "status": "ok",
                 "account_id": input.account_id,
-                "mailbox": input.mailbox,
+                "mailbox": mailbox,
                 "total_matched": 0,
                 "deleted_count": 0,
                 "has_more": false,
@@ -2737,7 +2790,7 @@ impl MailImapServer {
             .join(",");
 
         let rw_uidvalidity =
-            imap::select_mailbox_readwrite(&self.config, &mut session, &input.mailbox).await?;
+            imap::select_mailbox_readwrite(&self.config, &mut session, &mailbox).await?;
         if rw_uidvalidity != uidvalidity {
             return Err(AppError::Conflict(
                 "UIDVALIDITY changed between search and delete".to_owned(),
@@ -2759,7 +2812,7 @@ impl MailImapServer {
         Ok(serde_json::json!({
             "status": "ok",
             "account_id": input.account_id,
-            "mailbox": input.mailbox,
+            "mailbox": mailbox,
             "total_matched": total_matched,
             "deleted_count": deleted_count,
             "remaining": remaining,
@@ -2786,6 +2839,10 @@ impl MailImapServer {
             imap::connect_authenticated(&self.config, account, self.token_manager.as_deref())
                 .await?;
 
+        let destination_mailbox =
+            imap::resolve_mailbox_name(&self.config, &mut session, &input.destination_mailbox)
+                .await?;
+
         let uidvalidity =
             imap::select_mailbox_readwrite(&self.config, &mut session, &parsed.mailbox).await?;
         if uidvalidity != parsed.uidvalidity {
@@ -2796,21 +2853,9 @@ impl MailImapServer {
 
         let caps = imap::capabilities(&self.config, &mut session).await?;
         if caps.has_str("MOVE") {
-            imap::uid_move_bulk(
-                &self.config,
-                &mut session,
-                &uid_set,
-                &input.destination_mailbox,
-            )
-            .await?;
+            imap::uid_move_bulk(&self.config, &mut session, &uid_set, &destination_mailbox).await?;
         } else {
-            imap::uid_copy_bulk(
-                &self.config,
-                &mut session,
-                &uid_set,
-                &input.destination_mailbox,
-            )
-            .await?;
+            imap::uid_copy_bulk(&self.config, &mut session, &uid_set, &destination_mailbox).await?;
             imap::uid_store_bulk(
                 &self.config,
                 &mut session,
@@ -2825,7 +2870,7 @@ impl MailImapServer {
             "status": "ok",
             "account_id": input.account_id,
             "source_mailbox": parsed.mailbox,
-            "destination_mailbox": input.destination_mailbox,
+            "destination_mailbox": destination_mailbox,
             "moved_count": parsed.uids.len(),
         }))
     }
@@ -2964,10 +3009,12 @@ impl MailImapServer {
         let mut session =
             imap::connect_authenticated(&self.config, account, self.token_manager.as_deref())
                 .await?;
+        let mailbox =
+            imap::resolve_mailbox_name(&self.config, &mut session, &input.mailbox).await?;
         imap::append(
             &self.config,
             &mut session,
-            &input.mailbox,
+            &mailbox,
             input.raw_message.as_bytes(),
         )
         .await?;
@@ -2975,7 +3022,7 @@ impl MailImapServer {
         Ok(serde_json::json!({
             "status": "ok",
             "account_id": input.account_id,
-            "mailbox": input.mailbox,
+            "mailbox": mailbox,
             "size_bytes": input.raw_message.len(),
         }))
     }
@@ -3448,49 +3495,12 @@ impl MailImapServer {
         let sent_folder = mailboxes
             .iter()
             .map(|m| m.name().to_owned())
-            .find(|name| is_sent_folder_name(name))
+            .find(|name| imap::is_sent_folder_name(name))
             .unwrap_or_else(|| "Sent".to_owned());
 
         imap::append(&self.config, &mut session, &sent_folder, rfc822).await?;
         Ok(())
     }
-}
-
-/// Return `true` if `name` looks like a Sent folder on any major provider,
-/// including common non-English names. Case-insensitive.
-fn is_sent_folder_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    // Fast path: exact matches for common top-level names (English + localized)
-    matches!(
-        lower.as_str(),
-        "sent"
-            | "sent items"
-            | "sent mail"
-            | "sent messages"
-            | "enviado"
-            | "enviados"
-            | "enviadas"
-            | "elementos enviados"
-            | "correo enviado"
-            | "itens enviados"
-            | "mensagens enviadas"
-            | "envoyés"
-            | "éléments envoyés"
-            | "gesendet"
-            | "gesendete elemente"
-            | "posta inviata"
-            | "inviati"
-            | "verzonden"
-            | "wyslane"
-            | "wysłane"
-    ) || lower.ends_with("/sent")
-        || lower.ends_with("/sent items")
-        || lower.ends_with("/sent mail")
-        || lower.ends_with("/sent messages")
-        || lower.ends_with("/enviado")
-        || lower.ends_with("/enviados")
-        || lower.ends_with("/elementos enviados")
-        || lower.contains("[gmail]/sent")
 }
 
 /// Calculate elapsed milliseconds
@@ -4488,10 +4498,11 @@ fn parse_bulk_message_ids(account_id: &str, message_ids: &[String]) -> AppResult
 /// Tests for server-side validation and encoding helpers.
 mod tests {
     use super::{
-        encode_raw_source_base64, escape_imap_quoted, is_sent_folder_name,
-        sanitize_attachment_filename, select_attachment, validate_email_no_wrapper_leak,
-        validate_flag, validate_mailbox, validate_search_text,
+        encode_raw_source_base64, escape_imap_quoted, sanitize_attachment_filename,
+        select_attachment, validate_email_no_wrapper_leak, validate_flag, validate_mailbox,
+        validate_search_text,
     };
+    use crate::imap::is_sent_folder_name;
     use crate::mime::ExtractedAttachment;
 
     fn att(part_id: &str, filename: Option<&str>) -> ExtractedAttachment {

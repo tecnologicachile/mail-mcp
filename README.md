@@ -240,6 +240,7 @@ start a NEW session in the project (not `--continue`).
 | Microsoft 365 (enterprise) | Yes | Admin-dependent | Yes | **Yes** | Yes | Yes |
 | Hotmail / Outlook.com | Yes | Blocked by MS | Yes | **Yes** | Yes | Yes |
 | Gmail | Yes | Yes | — | — | Yes | Yes |
+| Apple iCloud | Yes | Yes | — | — | — | Yes |
 | Zoho | Yes | Yes | — | — | — | Yes |
 | Fastmail | Yes | Yes | — | — | — | Yes |
 | Any IMAP/SMTP server | Yes | Yes | — | — | — | Yes |
@@ -406,7 +407,7 @@ binary stays out of the response. Set the default download directory with
 
 | Tool | What it does |
 |------|-------------|
-| `get_setup_guide` | Provider-specific setup instructions (Microsoft OAuth2, Gmail App Passwords, Zoho, etc.) |
+| `get_setup_guide` | Provider-specific setup instructions (Microsoft OAuth2, Gmail/iCloud App Passwords, Zoho, etc.) |
 
 ## Multi-Account
 
@@ -417,6 +418,15 @@ Configure as many accounts as you need:
 MAIL_IMAP_GMAIL_HOST=imap.gmail.com
 MAIL_IMAP_GMAIL_USER=me@gmail.com
 MAIL_IMAP_GMAIL_PASS=app-password
+
+# Apple iCloud (App-Specific Password from appleid.apple.com)
+MAIL_IMAP_ICLOUD_HOST=imap.mail.me.com
+MAIL_IMAP_ICLOUD_USER=you@icloud.com
+MAIL_IMAP_ICLOUD_PASS=app-specific-password
+MAIL_SMTP_ICLOUD_HOST=smtp.mail.me.com
+MAIL_SMTP_ICLOUD_USER=you@icloud.com
+MAIL_SMTP_ICLOUD_PASS=app-specific-password
+MAIL_SMTP_ICLOUD_SECURE=starttls
 
 # Microsoft 365
 MAIL_IMAP_WORK_HOST=outlook.office365.com
@@ -436,7 +446,7 @@ MAIL_SMTP_DEFAULT_PASS=password
 MAIL_SMTP_DEFAULT_SECURE=starttls
 ```
 
-Use `account_id` in tool calls: `"account_id": "gmail"`, `"account_id": "work"`, `"account_id": "default"`.
+Use `account_id` in tool calls: `"account_id": "gmail"`, `"account_id": "icloud"`, `"account_id": "work"`, `"account_id": "default"`.
 
 ## Security
 

@@ -337,19 +337,212 @@ pub async fn fetch_one(
     }
 }
 
-/// Fetch full RFC822 message source
+/// Fetch full message source (headers + body).
 ///
-/// Returns raw bytes of the entire message.
+/// Prefers `BODY.PEEK[]` so the message is not marked `\Seen`. Apple iCloud
+/// (`imap.mail.me.com`) returns empty for `RFC822` but populates `body()` for
+/// `BODY.PEEK[]`. Falls back to `RFC822` for servers that only expose the
+/// Rfc822 attribute.
 pub async fn fetch_raw_message(
     server: &ServerConfig,
     session: &mut ImapSession,
     uid: u32,
 ) -> AppResult<Vec<u8>> {
+    match fetch_one(server, session, uid, "BODY.PEEK[]").await {
+        Ok(fetch) => {
+            if let Some(body) = fetch.body().filter(|b| !b.is_empty()) {
+                return Ok(body.to_vec());
+            }
+        }
+        Err(AppError::NotFound(msg)) => return Err(AppError::NotFound(msg)),
+        Err(AppError::Timeout(msg)) => return Err(AppError::Timeout(msg)),
+        // Protocol/query incompatibility: try RFC822.
+        Err(_) => {}
+    }
+
     let fetch = fetch_one(server, session, uid, "RFC822").await?;
-    let body = fetch
-        .body()
-        .ok_or_else(|| AppError::Internal("message has no RFC822 body".to_owned()))?;
+    let body = fetch.body().filter(|b| !b.is_empty()).ok_or_else(|| {
+        AppError::Internal("message has no body (BODY.PEEK[] and RFC822 both empty)".to_owned())
+    })?;
     Ok(body.to_vec())
+}
+
+/// Common mailbox roles used for short-name alias resolution across providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailboxRole {
+    Sent,
+    Trash,
+    Drafts,
+    Junk,
+}
+
+/// Return `true` if `name` looks like a Sent folder on any major provider,
+/// including common non-English names. Case-insensitive.
+pub fn is_sent_folder_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "sent"
+            | "sent items"
+            | "sent mail"
+            | "sent messages"
+            | "enviado"
+            | "enviados"
+            | "enviadas"
+            | "elementos enviados"
+            | "correo enviado"
+            | "itens enviados"
+            | "mensagens enviadas"
+            | "envoyés"
+            | "éléments envoyés"
+            | "gesendet"
+            | "gesendete elemente"
+            | "posta inviata"
+            | "inviati"
+            | "verzonden"
+            | "wyslane"
+            | "wysłane"
+    ) || lower.ends_with("/sent")
+        || lower.ends_with("/sent items")
+        || lower.ends_with("/sent mail")
+        || lower.ends_with("/sent messages")
+        || lower.ends_with("/enviado")
+        || lower.ends_with("/enviados")
+        || lower.ends_with("/elementos enviados")
+        || lower.contains("[gmail]/sent")
+}
+
+/// Return `true` if `name` looks like a Trash/Deleted folder.
+pub fn is_trash_folder_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "trash"
+            | "deleted"
+            | "deleted messages"
+            | "deleted items"
+            | "bin"
+            | "papelera"
+            | "elementos eliminados"
+            | "lixeira"
+            | "itens excluídos"
+            | "corbeille"
+            | "éléments supprimés"
+            | "papierkorb"
+            | "gelöschte elemente"
+            | "cestino"
+    ) || lower.ends_with("/trash")
+        || lower.ends_with("/deleted messages")
+        || lower.ends_with("/deleted items")
+        || lower.ends_with("/bin")
+        || lower.contains("[gmail]/trash")
+}
+
+/// Return `true` if `name` looks like a Drafts folder.
+pub fn is_drafts_folder_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "drafts"
+            | "draft"
+            | "borrador"
+            | "borradores"
+            | "rascunhos"
+            | "brouillons"
+            | "entwürfe"
+            | "bozze"
+    ) || lower.ends_with("/drafts")
+        || lower.ends_with("/draft")
+        || lower.contains("[gmail]/drafts")
+}
+
+/// Return `true` if `name` looks like a Junk/Spam folder.
+pub fn is_junk_folder_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "junk"
+            | "spam"
+            | "junk email"
+            | "junk e-mail"
+            | "bulk mail"
+            | "correo no deseado"
+            | "lixo eletrônico"
+            | "lixo eletronico"
+            | "courrier indésirable"
+            | "junk-e-mail"
+    ) || lower.ends_with("/junk")
+        || lower.ends_with("/spam")
+        || lower.contains("[gmail]/spam")
+        || lower.contains("[gmail]/junk")
+}
+
+/// Map a user-facing short mailbox name to a [`MailboxRole`], if it is a known alias.
+///
+/// Case-insensitive. Real provider folder names that are also aliases (e.g.
+/// iCloud `"Sent Messages"`) return `Some` so LIST + exact match can run.
+pub fn mailbox_role_for_alias(name: &str) -> Option<MailboxRole> {
+    let lower = name.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "sent" | "sent items" | "sent mail" | "sent messages" => Some(MailboxRole::Sent),
+        "trash" | "deleted" | "deleted messages" | "deleted items" | "bin" => {
+            Some(MailboxRole::Trash)
+        }
+        "drafts" | "draft" => Some(MailboxRole::Drafts),
+        "junk" | "spam" | "junk email" | "junk e-mail" | "bulk mail" => Some(MailboxRole::Junk),
+        _ => None,
+    }
+}
+
+fn role_detector(role: MailboxRole) -> fn(&str) -> bool {
+    match role {
+        MailboxRole::Sent => is_sent_folder_name,
+        MailboxRole::Trash => is_trash_folder_name,
+        MailboxRole::Drafts => is_drafts_folder_name,
+        MailboxRole::Junk => is_junk_folder_name,
+    }
+}
+
+/// Resolve a requested mailbox name against a LIST of available folders.
+///
+/// Order: exact match → case-insensitive exact match → role-alias detector →
+/// return `requested` unchanged.
+pub fn resolve_mailbox_among(requested: &str, available: &[impl AsRef<str>]) -> String {
+    if let Some(hit) = available.iter().find(|n| n.as_ref() == requested) {
+        return hit.as_ref().to_owned();
+    }
+    if let Some(hit) = available
+        .iter()
+        .find(|n| n.as_ref().eq_ignore_ascii_case(requested))
+    {
+        return hit.as_ref().to_owned();
+    }
+    if let Some(role) = mailbox_role_for_alias(requested) {
+        let detector = role_detector(role);
+        if let Some(hit) = available.iter().find(|n| detector(n.as_ref())) {
+            return hit.as_ref().to_owned();
+        }
+    }
+    requested.to_owned()
+}
+
+/// Resolve a user-supplied mailbox name to the provider's real folder name.
+///
+/// Fast path: if `requested` is not a known role alias (`INBOX`, custom folders,
+/// already-canonical non-alias names), returns it unchanged without LIST.
+/// When the name is a role alias (`Sent`, `Trash`, …), lists mailboxes and
+/// resolves via [`resolve_mailbox_among`].
+pub async fn resolve_mailbox_name(
+    server: &ServerConfig,
+    session: &mut ImapSession,
+    requested: &str,
+) -> AppResult<String> {
+    if mailbox_role_for_alias(requested).is_none() {
+        return Ok(requested.to_owned());
+    }
+    let listed = list_all_mailboxes(server, session).await?;
+    let available: Vec<&str> = listed.iter().map(async_imap::types::Name::name).collect();
+    Ok(resolve_mailbox_among(requested, &available))
 }
 
 /// Fetch curated headers and flags
@@ -671,6 +864,7 @@ pub async fn uid_expunge_bulk(
 
 #[cfg(test)]
 mod tests {
+
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -686,11 +880,106 @@ mod tests {
     use tokio_rustls::TlsConnector;
 
     use super::{
-        append, fetch_flags, fetch_raw_message, list_all_mailboxes, noop, select_mailbox_readonly,
+        MailboxRole, append, fetch_flags, fetch_raw_message, is_drafts_folder_name,
+        is_junk_folder_name, is_sent_folder_name, is_trash_folder_name, list_all_mailboxes,
+        mailbox_role_for_alias, noop, resolve_mailbox_among, select_mailbox_readonly,
         select_mailbox_readwrite, socket_timeout, uid_copy, uid_expunge, uid_move, uid_search,
         uid_store,
     };
     use crate::config::{AccountConfig, ServerConfig};
+
+
+    #[test]
+    fn resolve_mailbox_among_icloud_aliases() {
+        let icloud = [
+            "INBOX",
+            "Sent Messages",
+            "Deleted Messages",
+            "Junk",
+            "Drafts",
+            "Archive",
+        ];
+        assert_eq!(resolve_mailbox_among("Sent", &icloud), "Sent Messages");
+        assert_eq!(resolve_mailbox_among("Trash", &icloud), "Deleted Messages");
+        assert_eq!(resolve_mailbox_among("Junk", &icloud), "Junk");
+        assert_eq!(resolve_mailbox_among("Drafts", &icloud), "Drafts");
+        assert_eq!(
+            resolve_mailbox_among("Sent Messages", &icloud),
+            "Sent Messages"
+        );
+        assert_eq!(
+            resolve_mailbox_among("Deleted Messages", &icloud),
+            "Deleted Messages"
+        );
+    }
+
+    #[test]
+    fn resolve_mailbox_among_gmail_aliases() {
+        let gmail = [
+            "INBOX",
+            "[Gmail]/Sent Mail",
+            "[Gmail]/Trash",
+            "[Gmail]/Drafts",
+            "[Gmail]/Spam",
+            "Work",
+        ];
+        assert_eq!(resolve_mailbox_among("Sent", &gmail), "[Gmail]/Sent Mail");
+        assert_eq!(resolve_mailbox_among("Trash", &gmail), "[Gmail]/Trash");
+        assert_eq!(resolve_mailbox_among("Drafts", &gmail), "[Gmail]/Drafts");
+        assert_eq!(resolve_mailbox_among("Spam", &gmail), "[Gmail]/Spam");
+        assert_eq!(resolve_mailbox_among("Junk", &gmail), "[Gmail]/Spam");
+    }
+
+    #[test]
+    fn resolve_mailbox_among_exact_and_case_and_passthrough() {
+        let boxes = ["INBOX", "Projects", "Sent Items"];
+        assert_eq!(resolve_mailbox_among("Projects", &boxes), "Projects");
+        assert_eq!(resolve_mailbox_among("inbox", &boxes), "INBOX");
+        assert_eq!(resolve_mailbox_among("Sent", &boxes), "Sent Items");
+        // Unknown custom folder is returned unchanged (caller may still select it).
+        assert_eq!(
+            resolve_mailbox_among("MyCustomFolder", &boxes),
+            "MyCustomFolder"
+        );
+        // Alias with no matching folder on this provider stays as requested.
+        assert_eq!(resolve_mailbox_among("Junk", &boxes), "Junk");
+    }
+
+    #[test]
+    fn mailbox_role_for_alias_covers_short_names() {
+        assert_eq!(mailbox_role_for_alias("Sent"), Some(MailboxRole::Sent));
+        assert_eq!(
+            mailbox_role_for_alias("sent messages"),
+            Some(MailboxRole::Sent)
+        );
+        assert_eq!(mailbox_role_for_alias("Trash"), Some(MailboxRole::Trash));
+        assert_eq!(
+            mailbox_role_for_alias("Deleted Messages"),
+            Some(MailboxRole::Trash)
+        );
+        assert_eq!(mailbox_role_for_alias("Drafts"), Some(MailboxRole::Drafts));
+        assert_eq!(mailbox_role_for_alias("spam"), Some(MailboxRole::Junk));
+        assert_eq!(mailbox_role_for_alias("INBOX"), None);
+        assert_eq!(mailbox_role_for_alias("Archive"), None);
+        assert_eq!(mailbox_role_for_alias("Projects"), None);
+    }
+
+    #[test]
+    fn folder_role_detectors_cover_common_providers() {
+        assert!(is_sent_folder_name("[Gmail]/Sent Mail"));
+        assert!(is_sent_folder_name("Sent Messages"));
+        assert!(is_sent_folder_name("Sent Items"));
+        assert!(is_trash_folder_name("Deleted Messages"));
+        assert!(is_trash_folder_name("[Gmail]/Trash"));
+        assert!(is_trash_folder_name("Trash"));
+        assert!(is_drafts_folder_name("Drafts"));
+        assert!(is_drafts_folder_name("[Gmail]/Drafts"));
+        assert!(is_junk_folder_name("Junk"));
+        assert!(is_junk_folder_name("[Gmail]/Spam"));
+        assert!(is_junk_folder_name("Spam"));
+        assert!(!is_trash_folder_name("INBOX"));
+        assert!(!is_junk_folder_name("Archive"));
+    }
 
     /// Holds connection details for a GreenMail test server instance.
     #[derive(Debug, Clone)]
