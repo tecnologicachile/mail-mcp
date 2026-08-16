@@ -222,7 +222,10 @@ fn build_help_output(env_map: &BTreeMap<String, String>) -> String {
     out.push_str("  MAIL_SMTP_<ACCOUNT>_USER\n");
     out.push_str("  MAIL_SMTP_<ACCOUNT>_PASS       (optional if OAuth2 configured)\n");
     out.push_str(
-        "  MAIL_SMTP_<ACCOUNT>_SECURE     (starttls | tls | plain, default: starttls)\n\n",
+        "  MAIL_SMTP_<ACCOUNT>_SECURE     (starttls | tls | plain, default: starttls)\n",
+    );
+    out.push_str(
+        "  MAIL_SMTP_<ACCOUNT>_FROM_EMAIL (optional: sender addr if differs from USER)\n\n",
     );
 
     out.push_str("Discovered SMTP sections (from current environment)\n");
@@ -231,7 +234,7 @@ fn build_help_output(env_map: &BTreeMap<String, String>) -> String {
     } else {
         for section in &smtp_sections {
             out.push_str(&format!("  [{}]\n", section));
-            for suffix in ["HOST", "PORT", "USER", "PASS", "SECURE"] {
+            for suffix in ["HOST", "PORT", "USER", "PASS", "SECURE", "FROM_EMAIL"] {
                 let key = format!("MAIL_SMTP_{}_{}", section, suffix);
                 let value = env_map.get(&key).map(String::as_str);
                 out.push_str(&format!("    {}={}\n", key, redact_value(&key, value)));

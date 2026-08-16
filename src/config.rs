@@ -535,6 +535,11 @@ fn load_smtp_accounts(
 
         let save_sent = parse_opt_bool_env(&format!("{prefix}SAVE_SENT"))?;
 
+        let from_email = match env::var(format!("{prefix}FROM_EMAIL")) {
+            Ok(v) if !v.trim().is_empty() => Some(v.trim().to_owned()),
+            _ => None,
+        };
+
         smtp_accounts.insert(
             account_id.clone(),
             SmtpAccountConfig {
@@ -546,6 +551,7 @@ fn load_smtp_accounts(
                 security,
                 auth_method,
                 save_sent,
+                from_email,
             },
         );
     }
@@ -767,6 +773,7 @@ mod tests {
                 security: SmtpSecurity::Starttls,
                 auth_method: AuthMethod::Password,
                 save_sent: account_save_sent,
+                from_email: None,
             },
         );
         ServerConfig {

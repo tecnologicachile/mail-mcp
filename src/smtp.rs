@@ -79,6 +79,15 @@ pub struct SmtpAccountConfig {
     /// `Some(true/false)` = explicit per-account choice via
     /// `MAIL_SMTP_<ID>_SAVE_SENT`.
     pub save_sent: Option<bool>,
+    /// From (sender) email address, independent of `user` (SMTP auth username).
+    ///
+    /// `None` = not set; the From address falls back to `user`.
+    /// `Some(addr)` = use `addr` as the From/Reply-to-self address instead of
+    /// `user`. Set via `MAIL_SMTP_<ID>_FROM_EMAIL`. Needed when the SMTP auth
+    /// username differs from the desired sender address (e.g. shared/group
+    /// mailboxes where auth uses a personal account but the From should be
+    /// the group address).
+    pub from_email: Option<String>,
 }
 
 // ─── Email composition ───────────────────────────────────────────────────────

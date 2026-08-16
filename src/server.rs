@@ -3013,8 +3013,14 @@ impl MailImapServer {
         let smtp_config = self.config.get_smtp_account(&input.account_id)?;
         let attachments = decode_attachments(&input.attachments)?;
 
+        let from_addr = smtp_config
+            .from_email
+            .as_ref()
+            .unwrap_or(&smtp_config.user)
+            .clone();
+
         let composition = smtp::EmailComposition {
-            from: smtp_config.user.clone(),
+            from: from_addr,
             to: input.to.clone(),
             cc: input.cc.clone(),
             bcc: input.bcc.clone(),
@@ -3121,7 +3127,11 @@ impl MailImapServer {
 
         // Determine recipients
         let smtp_config = self.config.get_smtp_account(&input.account_id)?;
-        let self_email = smtp_config.user.to_ascii_lowercase();
+        let self_email = smtp_config
+            .from_email
+            .as_ref()
+            .unwrap_or(&smtp_config.user)
+            .to_ascii_lowercase();
 
         let to = if input.reply_all {
             // Reply-all: reply to original From + original To (minus self)
@@ -3156,7 +3166,11 @@ impl MailImapServer {
         }
 
         let composition = smtp::EmailComposition {
-            from: smtp_config.user.clone(),
+            from: smtp_config
+                .from_email
+                .as_ref()
+                .unwrap_or(&smtp_config.user)
+                .clone(),
             to: to.clone(),
             cc,
             bcc: vec![],
@@ -3265,7 +3279,11 @@ impl MailImapServer {
         let smtp_config = self.config.get_smtp_account(&input.account_id)?;
 
         let composition = smtp::EmailComposition {
-            from: smtp_config.user.clone(),
+            from: smtp_config
+                .from_email
+                .as_ref()
+                .unwrap_or(&smtp_config.user)
+                .clone(),
             to: input.to.clone(),
             cc: vec![],
             bcc: vec![],

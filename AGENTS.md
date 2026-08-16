@@ -228,6 +228,11 @@ The repository publishes GitHub Release archives/installers via cargo-dist.
 - Do not silently alter public tool contracts.
 - Update docs when behavior or bounds change.
 - If adding env vars, document them in `docs/tool-contract.md` and this file.
+- `MAIL_SMTP_<ID>_FROM_EMAIL`: optional sender address override. When the
+  SMTP auth username (`_USER`) differs from the desired From address (e.g.
+  shared/group mailboxes where auth uses a personal account but the From
+  should be the group address), set this to the group address. When unset,
+  the From address defaults to `_USER`. Affects send, reply, and forward.
 
 ## Quick Pre-Commit Checklist
 
