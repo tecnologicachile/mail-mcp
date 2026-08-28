@@ -34,6 +34,34 @@ Global settings:
 
 ---
 
+## NetEase Mail (126.com / 163.com / yeah.net)
+
+Enable IMAP in the web mailbox settings and create a dedicated client authorization
+password. Do not use the normal web mailbox password.
+
+```env
+# Use imap.163.com for 163.com, imap.126.com for 126.com,
+# or imap.yeah.net for yeah.net.
+MAIL_IMAP_NETEASE_HOST=imap.126.com
+MAIL_IMAP_NETEASE_PORT=993
+MAIL_IMAP_NETEASE_USER=you@126.com
+MAIL_IMAP_NETEASE_PASS=your-client-authorization-password
+MAIL_IMAP_NETEASE_SECURE=true
+```
+
+NetEase IMAP servers require clients to identify themselves with the RFC 2971
+`ID` command. mail-mcp sends client identification after authentication whenever
+the server advertises the `ID` capability.
+
+For read-only access, keep both write gates disabled:
+
+```env
+MAIL_IMAP_WRITE_ENABLED=false
+MAIL_SMTP_WRITE_ENABLED=false
+```
+
+---
+
 ## Microsoft Personal (Hotmail / Outlook.com)
 
 ### IMAP (reading email)

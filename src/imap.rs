@@ -90,6 +90,7 @@ fn socket_timeout(server: &ServerConfig) -> Duration {
 /// 2. TLS handshake (if `secure: true`) or plaintext (if `secure: false`)
 /// 3. Read IMAP greeting
 /// 4. Authentication (LOGIN or XOAUTH2 depending on `auth_method`)
+/// 5. Client identification when the server advertises RFC 2971 `ID`
 ///
 /// # Security
 ///
@@ -158,7 +159,7 @@ pub async fn connect_authenticated(
         ));
     }
 
-    let session = match account.auth_method {
+    let mut session = match account.auth_method {
         AuthMethod::OAuth2 => {
             let tm = token_manager.ok_or_else(|| {
                 AppError::Internal(format!(
@@ -208,7 +209,51 @@ pub async fn connect_authenticated(
         }
     };
 
+    send_client_identification_if_supported(greeting_duration, &mut session).await?;
+
     Ok(session)
+}
+
+/// Identify mail-mcp to servers that advertise the RFC 2971 `ID` extension.
+///
+/// Some providers, including NetEase, reject mailbox access from unidentified
+/// clients after authentication. Servers without the extension are left
+/// untouched.
+async fn send_client_identification_if_supported(
+    operation_timeout: Duration,
+    session: &mut ImapSession,
+) -> AppResult<()> {
+    let capabilities = timeout(operation_timeout, session.capabilities())
+        .await
+        .map_err(|_| AppError::Timeout("CAPABILITY timed out before IMAP ID".to_owned()))
+        .and_then(|result| {
+            result.map_err(|error| {
+                AppError::Internal(format!(
+                    "CAPABILITY failed before IMAP client identification: {error}"
+                ))
+            })
+        })?;
+
+    if !capabilities.has_str("ID") {
+        return Ok(());
+    }
+
+    timeout(
+        operation_timeout,
+        session.id([
+            ("name", Some("mail-mcp")),
+            ("version", Some(env!("CARGO_PKG_VERSION"))),
+            ("vendor", Some("tecnologicachile")),
+            ("support-url", Some(env!("CARGO_PKG_REPOSITORY"))),
+        ]),
+    )
+    .await
+    .map_err(|_| AppError::Timeout("IMAP ID timed out".to_owned()))
+    .and_then(|result| {
+        result.map_err(|error| AppError::Internal(format!("IMAP ID failed: {error}")))
+    })?;
+
+    Ok(())
 }
 
 /// Send NOOP to test connection liveness
@@ -680,7 +725,8 @@ mod tests {
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
     use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
     use secrecy::{ExposeSecret, SecretString};
-    use tokio::net::TcpStream;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::{TcpListener, TcpStream};
     use tokio::time::sleep;
     use tokio::time::timeout;
     use tokio_rustls::TlsConnector;
@@ -691,6 +737,164 @@ mod tests {
         uid_store,
     };
     use crate::config::{AccountConfig, ServerConfig};
+
+    async fn read_imap_command(stream: &mut BufReader<TcpStream>) -> String {
+        let mut command = String::new();
+        stream
+            .read_line(&mut command)
+            .await
+            .expect("test IMAP server should read a command");
+        assert!(
+            !command.is_empty(),
+            "client closed before sending a command"
+        );
+        command
+    }
+
+    async fn reply_ok(stream: &mut BufReader<TcpStream>, command: &str, message: &str) {
+        let tag = command
+            .split_whitespace()
+            .next()
+            .expect("IMAP command should have a tag");
+        stream
+            .get_mut()
+            .write_all(format!("{tag} OK {message}\r\n").as_bytes())
+            .await
+            .expect("test IMAP server should write a response");
+    }
+
+    #[tokio::test]
+    async fn sends_client_identification_when_server_advertises_id() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener should expose its address");
+
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener
+                .accept()
+                .await
+                .expect("test server should accept a client");
+            let mut stream = BufReader::new(socket);
+
+            let login = read_imap_command(&mut stream).await;
+            assert!(login.contains(" LOGIN "));
+            reply_ok(&mut stream, &login, "LOGIN completed").await;
+
+            let capability = read_imap_command(&mut stream).await;
+            assert!(capability.contains(" CAPABILITY"));
+            let tag = capability
+                .split_whitespace()
+                .next()
+                .expect("CAPABILITY command should have a tag");
+            stream
+                .get_mut()
+                .write_all(
+                    format!("* CAPABILITY IMAP4rev1 ID\r\n{tag} OK CAPABILITY completed\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .expect("test server should advertise ID");
+
+            let identification = read_imap_command(&mut stream).await;
+            assert!(identification.contains(" ID ("));
+            assert!(identification.contains("\"name\" \"mail-mcp\""));
+            assert!(identification.contains("\"version\""));
+            assert!(identification.contains("\"vendor\" \"tecnologicachile\""));
+            assert!(identification.contains("\"support-url\""));
+            let tag = identification
+                .split_whitespace()
+                .next()
+                .expect("ID command should have a tag");
+            stream
+                .get_mut()
+                .write_all(format!("* ID NIL\r\n{tag} OK ID completed\r\n").as_bytes())
+                .await
+                .expect("test server should accept ID");
+        });
+
+        let tcp = TcpStream::connect(address)
+            .await
+            .expect("test client should connect");
+        let client = Client::new(super::ImapStream::Plain(tcp));
+        let test_password = ["test", "password"].join("-");
+        let mut session = client
+            .login("user@example.com", test_password)
+            .await
+            .map_err(|(error, _)| error)
+            .expect("test client should authenticate");
+
+        super::send_client_identification_if_supported(Duration::from_secs(1), &mut session)
+            .await
+            .expect("client identification should succeed");
+
+        server.await.expect("test IMAP server should finish");
+    }
+
+    #[tokio::test]
+    async fn skips_client_identification_without_id_capability() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener should expose its address");
+
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener
+                .accept()
+                .await
+                .expect("test server should accept a client");
+            let mut stream = BufReader::new(socket);
+
+            let login = read_imap_command(&mut stream).await;
+            reply_ok(&mut stream, &login, "LOGIN completed").await;
+
+            let capability = read_imap_command(&mut stream).await;
+            let tag = capability
+                .split_whitespace()
+                .next()
+                .expect("CAPABILITY command should have a tag");
+            stream
+                .get_mut()
+                .write_all(
+                    format!("* CAPABILITY IMAP4rev1\r\n{tag} OK CAPABILITY completed\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .expect("test server should answer CAPABILITY");
+
+            let mut unexpected = String::new();
+            stream
+                .read_line(&mut unexpected)
+                .await
+                .expect("test server should observe client close");
+            assert!(
+                unexpected.is_empty(),
+                "client must not send ID when the server does not advertise it"
+            );
+        });
+
+        let tcp = TcpStream::connect(address)
+            .await
+            .expect("test client should connect");
+        let client = Client::new(super::ImapStream::Plain(tcp));
+        let test_password = ["test", "password"].join("-");
+        let mut session = client
+            .login("user@example.com", test_password)
+            .await
+            .map_err(|(error, _)| error)
+            .expect("test client should authenticate");
+
+        super::send_client_identification_if_supported(Duration::from_secs(1), &mut session)
+            .await
+            .expect("servers without ID should remain compatible");
+        drop(session);
+
+        server.await.expect("test IMAP server should finish");
+    }
 
     /// Holds connection details for a GreenMail test server instance.
     #[derive(Debug, Clone)]
