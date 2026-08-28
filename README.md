@@ -15,6 +15,29 @@
 
 Most email MCP servers only do IMAP reads. This one does **everything**: read, search, send, reply, forward, bulk operations, Microsoft Graph API, and Exchange Web Services — with real OAuth2, multi-account, and multi-provider support. Written in Rust for speed and safety.
 
+## What's New in v0.4.10
+
+Community release — all three changes came from external contributors. Thank you!
+
+- **NetEase IMAP compatibility (126.com / 163.com / yeah.net)** by
+  [@pep-27](https://github.com/pep-27) in
+  [#21](https://github.com/tecnologicachile/mail-mcp/pull/21). NetEase servers
+  reject mailbox access from clients that don't identify themselves. mail-mcp
+  now sends the RFC 2971 `ID` command after authentication whenever the server
+  advertises the `ID` capability. Includes mock-server regression tests and
+  NetEase setup docs in `docs/account-setup.md`.
+- **`MAIL_SMTP_<ID>_FROM_EMAIL` — sender address override** by
+  [@arwack](https://github.com/arwack) in
+  [#19](https://github.com/tecnologicachile/mail-mcp/pull/19). For shared/group
+  mailboxes where SMTP authenticates with a personal account but the From
+  address should be the group address. Applies to send, reply (including
+  reply-all self-address detection) and forward; falls back to `_USER` when
+  unset.
+- **Sent-mail copies are now marked `\Seen`** by
+  [@ray-of-darkness](https://github.com/ray-of-darkness) in
+  [#9](https://github.com/tecnologicachile/mail-mcp/pull/9). Copies the MCP
+  appends to the Sent folder after SMTP send no longer show up as unread.
+
 ## What's New in v0.4.9
 
 - **New tool `imap_get_attachment` — download a single attachment to disk.**
