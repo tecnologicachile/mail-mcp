@@ -2922,17 +2922,17 @@ impl MailImapServer {
             ));
         }
 
-        if let Some(ref flags) = input.add_flags {
-            if !flags.is_empty() {
-                let flag_str = format!("+FLAGS.SILENT ({})", flags.join(" "));
-                imap::uid_store_bulk(&self.config, &mut session, &uid_set, &flag_str).await?;
-            }
+        if let Some(ref flags) = input.add_flags
+            && !flags.is_empty()
+        {
+            let flag_str = format!("+FLAGS.SILENT ({})", flags.join(" "));
+            imap::uid_store_bulk(&self.config, &mut session, &uid_set, &flag_str).await?;
         }
-        if let Some(ref flags) = input.remove_flags {
-            if !flags.is_empty() {
-                let flag_str = format!("-FLAGS.SILENT ({})", flags.join(" "));
-                imap::uid_store_bulk(&self.config, &mut session, &uid_set, &flag_str).await?;
-            }
+        if let Some(ref flags) = input.remove_flags
+            && !flags.is_empty()
+        {
+            let flag_str = format!("-FLAGS.SILENT ({})", flags.join(" "));
+            imap::uid_store_bulk(&self.config, &mut session, &uid_set, &flag_str).await?;
         }
 
         Ok(serde_json::json!({
@@ -3045,16 +3045,15 @@ impl MailImapServer {
         .await?;
 
         // Optionally save to Sent folder via IMAP
-        if self.config.should_save_sent(&input.account_id) {
-            if let Err(e) = self
+        if self.config.should_save_sent(&input.account_id)
+            && let Err(e) = self
                 .save_to_sent_folder(&input.account_id, &sent.rfc822)
                 .await
-            {
-                warn!(
-                    account_id = input.account_id,
-                    "failed to save sent message to IMAP Sent folder: {e}"
-                );
-            }
+        {
+            warn!(
+                account_id = input.account_id,
+                "failed to save sent message to IMAP Sent folder: {e}"
+            );
         }
 
         let recipient_count = input.to.len() + input.cc.len() + input.bcc.len();
@@ -3194,16 +3193,15 @@ impl MailImapServer {
         )
         .await?;
 
-        if self.config.should_save_sent(&input.account_id) {
-            if let Err(e) = self
+        if self.config.should_save_sent(&input.account_id)
+            && let Err(e) = self
                 .save_to_sent_folder(&input.account_id, &sent.rfc822)
                 .await
-            {
-                warn!(
-                    account_id = input.account_id,
-                    "failed to save reply to IMAP Sent folder: {e}"
-                );
-            }
+        {
+            warn!(
+                account_id = input.account_id,
+                "failed to save reply to IMAP Sent folder: {e}"
+            );
         }
 
         let summary = format!("Reply sent to {}", to.first().unwrap_or(&String::new()));
@@ -3307,16 +3305,15 @@ impl MailImapServer {
         )
         .await?;
 
-        if self.config.should_save_sent(&input.account_id) {
-            if let Err(e) = self
+        if self.config.should_save_sent(&input.account_id)
+            && let Err(e) = self
                 .save_to_sent_folder(&input.account_id, &sent.rfc822)
                 .await
-            {
-                warn!(
-                    account_id = input.account_id,
-                    "failed to save forwarded message to IMAP Sent folder: {e}"
-                );
-            }
+        {
+            warn!(
+                account_id = input.account_id,
+                "failed to save forwarded message to IMAP Sent folder: {e}"
+            );
         }
 
         let summary = format!("Forwarded to {} recipient(s)", input.to.len());
@@ -3471,7 +3468,14 @@ impl MailImapServer {
             .find(|name| is_sent_folder_name(name))
             .unwrap_or_else(|| "Sent".to_owned());
 
-        imap::append(&self.config, &mut session, &sent_folder, Some("\\Seen"), rfc822).await?;
+        imap::append(
+            &self.config,
+            &mut session,
+            &sent_folder,
+            Some("\\Seen"),
+            rfc822,
+        )
+        .await?;
         Ok(())
     }
 }
@@ -4161,7 +4165,7 @@ fn extract_attachments_recursive(
     let ct = &part.ctype;
     let is_attachment = part.get_content_disposition().disposition
         == mailparse::DispositionType::Attachment
-        || ct.params.get("name").is_some();
+        || ct.params.contains_key("name");
     let is_text_body = ct.mimetype.starts_with("text/") && !is_attachment;
     let is_multipart = ct.mimetype.starts_with("multipart/");
 

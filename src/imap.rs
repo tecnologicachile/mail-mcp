@@ -26,6 +26,7 @@ use crate::oauth2::{TokenManager, XOAuth2Authenticator};
 
 /// Wrapper enum that supports both TLS and plaintext IMAP streams.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // TLS is the dominant variant; boxing it would add indirection on the hot path
 pub enum ImapStream {
     Tls(tokio_rustls::client::TlsStream<TcpStream>),
     Plain(TcpStream),

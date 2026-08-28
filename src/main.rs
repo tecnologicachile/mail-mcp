@@ -221,9 +221,7 @@ fn build_help_output(env_map: &BTreeMap<String, String>) -> String {
     out.push_str("  MAIL_SMTP_<ACCOUNT>_PORT       (default: 587)\n");
     out.push_str("  MAIL_SMTP_<ACCOUNT>_USER\n");
     out.push_str("  MAIL_SMTP_<ACCOUNT>_PASS       (optional if OAuth2 configured)\n");
-    out.push_str(
-        "  MAIL_SMTP_<ACCOUNT>_SECURE     (starttls | tls | plain, default: starttls)\n",
-    );
+    out.push_str("  MAIL_SMTP_<ACCOUNT>_SECURE     (starttls | tls | plain, default: starttls)\n");
     out.push_str(
         "  MAIL_SMTP_<ACCOUNT>_FROM_EMAIL (optional: sender addr if differs from USER)\n\n",
     );

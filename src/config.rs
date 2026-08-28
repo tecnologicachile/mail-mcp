@@ -285,13 +285,11 @@ fn load_account(
     let user = required_env(&format!("{prefix}USER"))?;
 
     // Password is optional when OAuth2 is configured for this account
-    let pass = match env::var(&format!("{prefix}PASS")) {
+    let pass = match env::var(format!("{prefix}PASS")) {
         Ok(v) if !v.trim().is_empty() => Some(SecretString::new(v.into())),
         _ if has_oauth2 => None,
         _ => {
-            return Err(AppError::InvalidInput(format!(
-                "No IMAP accounts configured. Set MAIL_IMAP_<ID>_HOST/USER/PASS (or configure OAuth2 via MAIL_OAUTH2_<ID>_*).\nmail-mcp startup error: missing PASS."
-            )));
+            return Err(AppError::InvalidInput("No IMAP accounts configured. Set MAIL_IMAP_<ID>_HOST/USER/PASS (or configure OAuth2 via MAIL_OAUTH2_<ID>_*).\nmail-mcp startup error: missing PASS.".to_string()));
         }
     };
 

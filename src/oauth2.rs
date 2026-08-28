@@ -131,10 +131,10 @@ impl TokenManager {
         // Check cache first
         {
             let cache = self.cache.lock().await;
-            if let Some(cached) = cache.get(account_id) {
-                if cached.is_valid() {
-                    return Ok(cached.access_token.clone());
-                }
+            if let Some(cached) = cache.get(account_id)
+                && cached.is_valid()
+            {
+                return Ok(cached.access_token.clone());
             }
         }
 

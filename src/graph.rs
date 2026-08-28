@@ -702,6 +702,7 @@ mod tests {
     /// documented limit (3 MB raw). Hard-codes the constant so a future
     /// edit doesn't silently shift the boundary into an invalid range.
     #[test]
+    #[allow(clippy::assertions_on_constants)] // intentional compile-time-value guards
     fn attachment_inline_threshold_matches_graph_spec() {
         assert_eq!(ATTACHMENT_INLINE_MAX_BYTES, 3 * 1024 * 1024);
         assert!(UPLOAD_CHUNK_BYTES <= 4 * 1024 * 1024);
