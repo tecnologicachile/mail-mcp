@@ -383,18 +383,24 @@ pub async fn fetch_one(
     }
 }
 
-/// Fetch full RFC822 message source
+/// Fetch full message source
 ///
-/// Returns raw bytes of the entire message.
+/// Returns the raw bytes of the entire message using the IMAP4rev1 `BODY[]`
+/// item. `BODY[]` is preferred over the deprecated `RFC822` item: some servers
+/// (notably iCloud, `imap.mail.me.com`) accept an `RFC822` fetch but leave the
+/// body unpopulated, returning an empty result. Header fetches on the same
+/// servers already use `BODY[...]` sections and work correctly, so aligning the
+/// raw fetch with `BODY[]` fixes content reads without affecting other servers
+/// (`Fetch::body()` extracts both `BODY[]` and `RFC822` responses).
 pub async fn fetch_raw_message(
     server: &ServerConfig,
     session: &mut ImapSession,
     uid: u32,
 ) -> AppResult<Vec<u8>> {
-    let fetch = fetch_one(server, session, uid, "RFC822").await?;
+    let fetch = fetch_one(server, session, uid, "BODY[]").await?;
     let body = fetch
         .body()
-        .ok_or_else(|| AppError::Internal("message has no RFC822 body".to_owned()))?;
+        .ok_or_else(|| AppError::Internal("message has no body".to_owned()))?;
     Ok(body.to_vec())
 }
 
@@ -896,6 +902,94 @@ mod tests {
             .await
             .expect("servers without ID should remain compatible");
         drop(session);
+
+        server.await.expect("test IMAP server should finish");
+    }
+
+    /// Regression test for iCloud content reads (see the upstream iCloud issue):
+    /// `fetch_raw_message` must request the message with the IMAP4rev1 `BODY[]`
+    /// item, not the deprecated `RFC822` item that iCloud leaves unpopulated,
+    /// and must return the body bytes from a `BODY[]` response unchanged.
+    #[tokio::test]
+    async fn fetch_raw_message_requests_body_and_returns_it() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener should expose its address");
+
+        let body: &[u8] = b"Subject: iCloud Body Test\r\n\r\nHello from BODY[].\r\n";
+
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener
+                .accept()
+                .await
+                .expect("test server should accept a client");
+            let mut stream = BufReader::new(socket);
+
+            let login = read_imap_command(&mut stream).await;
+            assert!(login.contains(" LOGIN "));
+            reply_ok(&mut stream, &login, "LOGIN completed").await;
+
+            let fetch = read_imap_command(&mut stream).await;
+            assert!(
+                fetch.contains("UID FETCH 42"),
+                "expected a UID FETCH for uid 42, got {fetch:?}"
+            );
+            assert!(
+                fetch.contains("BODY[]"),
+                "raw fetch must request BODY[], got {fetch:?}"
+            );
+            assert!(
+                !fetch.contains("RFC822"),
+                "raw fetch must not use the deprecated RFC822 item, got {fetch:?}"
+            );
+            let tag = fetch
+                .split_whitespace()
+                .next()
+                .expect("FETCH command should have a tag");
+
+            let header = format!("* 1 FETCH (UID 42 BODY[] {{{}}}\r\n", body.len());
+            let socket = stream.get_mut();
+            socket
+                .write_all(header.as_bytes())
+                .await
+                .expect("test server should write the fetch header");
+            socket
+                .write_all(body)
+                .await
+                .expect("test server should write the body literal");
+            socket
+                .write_all(format!(")\r\n{tag} OK UID FETCH completed\r\n").as_bytes())
+                .await
+                .expect("test server should complete the fetch");
+        });
+
+        let tcp = TcpStream::connect(address)
+            .await
+            .expect("test client should connect");
+        let client = Client::new(super::ImapStream::Plain(tcp));
+        let test_password = ["test", "password"].join("-");
+        let mut session = client
+            .login("user@example.com", test_password)
+            .await
+            .map_err(|(error, _)| error)
+            .expect("test client should authenticate");
+
+        let endpoints = GreenmailEndpoints {
+            host: "127.0.0.1".to_owned(),
+            smtp_port: 0,
+            imap_port: 0,
+            user: "user@example.com".to_owned(),
+            pass: "test-password".to_owned(),
+        };
+        let config = greenmail_test_config(&endpoints);
+
+        let raw = fetch_raw_message(&config, &mut session, 42)
+            .await
+            .expect("fetching a BODY[] message should succeed");
+        assert_eq!(raw, body, "returned bytes should match the BODY[] literal");
 
         server.await.expect("test IMAP server should finish");
     }
