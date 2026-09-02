@@ -558,8 +558,10 @@ pub async fn uid_expunge(
 /// Append raw RFC822 message to mailbox
 ///
 /// Used for cross-account copy operations and sent-mail archival.
-/// Pass `flags` to set initial flags on the appended message (e.g.
-/// `Some("\\Seen")` for sent mail). Does not return the new UID
+/// Pass `flags` as a space-separated list of flag atoms without surrounding
+/// parentheses (e.g. `Some("\\Seen")` for sent mail). This wrapper adds the
+/// parenthesized flag-list syntax required by IMAP before calling
+/// `async_imap::Session::append`. Does not return the new UID
 /// directly (would require `UIDPLUS` capability).
 pub async fn append(
     server: &ServerConfig,
@@ -568,9 +570,10 @@ pub async fn append(
     flags: Option<&str>,
     content: &[u8],
 ) -> AppResult<()> {
+    let flag_list = flags.map(|value| format!("({value})"));
     timeout(
         socket_timeout(server),
-        session.append(mailbox, flags, None, content),
+        session.append(mailbox, flag_list.as_deref(), None, content),
     )
     .await
     .map_err(|_| AppError::Timeout("APPEND timed out".to_owned()))
@@ -729,7 +732,7 @@ mod tests {
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
     use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
     use secrecy::{ExposeSecret, SecretString};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::time::sleep;
     use tokio::time::timeout;
@@ -896,6 +899,73 @@ mod tests {
             .await
             .expect("servers without ID should remain compatible");
         drop(session);
+
+        server.await.expect("test IMAP server should finish");
+    }
+
+    #[tokio::test]
+    async fn append_wraps_seen_flag_in_imap_flag_list() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener should expose its address");
+        let content = b"From: sender@example.com\r\nSubject: sent copy\r\n\r\nBody\r\n";
+
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener
+                .accept()
+                .await
+                .expect("test server should accept a client");
+            let mut stream = BufReader::new(socket);
+
+            let login = read_imap_command(&mut stream).await;
+            reply_ok(&mut stream, &login, "LOGIN completed").await;
+
+            let append_command = read_imap_command(&mut stream).await;
+            assert!(
+                append_command
+                    .contains(&format!(" APPEND \"Sent\" (\\Seen) {{{}}}", content.len())),
+                "APPEND must contain a parenthesized flag list; got {append_command:?}"
+            );
+            stream
+                .get_mut()
+                .write_all(b"+ Ready for literal\r\n")
+                .await
+                .expect("test server should request the literal");
+
+            let mut literal = vec![0_u8; content.len() + 2];
+            stream
+                .read_exact(&mut literal)
+                .await
+                .expect("test server should receive the message literal");
+            assert_eq!(&literal[..content.len()], content);
+            assert_eq!(&literal[content.len()..], b"\r\n");
+            reply_ok(&mut stream, &append_command, "APPEND completed").await;
+        });
+
+        let tcp = TcpStream::connect(address)
+            .await
+            .expect("test client should connect");
+        let client = Client::new(super::ImapStream::Plain(tcp));
+        let test_password = ["test", "password"].join("-");
+        let mut session = client
+            .login("user@example.com", test_password)
+            .await
+            .map_err(|(error, _)| error)
+            .expect("test client should authenticate");
+        let config = greenmail_test_config(&GreenmailEndpoints {
+            host: "127.0.0.1".to_owned(),
+            smtp_port: 0,
+            imap_port: address.port(),
+            user: "user@example.com".to_owned(),
+            pass: "test-password".to_owned(),
+        });
+
+        append(&config, &mut session, "Sent", Some("\\Seen"), content)
+            .await
+            .expect("APPEND with a Seen flag should succeed");
 
         server.await.expect("test IMAP server should finish");
     }
