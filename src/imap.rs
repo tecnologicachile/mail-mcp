@@ -3,6 +3,7 @@
 //! Provides timeout-bounded wrappers around `async-imap` operations. Supports
 //! both TLS and plaintext connections, with timeouts derived from server config.
 
+use std::borrow::Cow;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -555,12 +556,36 @@ pub async fn uid_expunge(
     Ok(())
 }
 
+/// Normalize an IMAP APPEND flags argument so it is always properly
+/// parenthesized on the wire.
+///
+/// `async-imap`'s `Session::append` interpolates `flags` verbatim into the
+/// APPEND command (e.g. `APPEND "Sent" <flags> {N}`) — it does not wrap the
+/// value in parens itself. Per RFC 3501, a non-empty flag list must be
+/// parenthesized (`(\Seen)`), so callers that pass a bare flag like
+/// `"\\Seen"` produce a malformed command that servers such as iCloud's
+/// reject. This normalizes any non-empty, not-already-parenthesized flags
+/// string by wrapping it; `None`/empty and an already-parenthesized string
+/// pass through unchanged.
+fn normalize_append_flags(flags: Option<&str>) -> Option<Cow<'_, str>> {
+    flags.and_then(|f| {
+        if f.is_empty() {
+            None
+        } else if f.starts_with('(') && f.ends_with(')') {
+            Some(Cow::Borrowed(f))
+        } else {
+            Some(Cow::Owned(format!("({f})")))
+        }
+    })
+}
+
 /// Append raw RFC822 message to mailbox
 ///
 /// Used for cross-account copy operations and sent-mail archival.
 /// Pass `flags` to set initial flags on the appended message (e.g.
-/// `Some("\\Seen")` for sent mail). Does not return the new UID
-/// directly (would require `UIDPLUS` capability).
+/// `Some("\\Seen")` for sent mail) — the value need not be parenthesized by
+/// the caller, it is normalized before being sent on the wire. Does not
+/// return the new UID directly (would require `UIDPLUS` capability).
 pub async fn append(
     server: &ServerConfig,
     session: &mut ImapSession,
@@ -568,9 +593,10 @@ pub async fn append(
     flags: Option<&str>,
     content: &[u8],
 ) -> AppResult<()> {
+    let flags = normalize_append_flags(flags);
     timeout(
         socket_timeout(server),
-        session.append(mailbox, flags, None, content),
+        session.append(mailbox, flags.as_deref(), None, content),
     )
     .await
     .map_err(|_| AppError::Timeout("APPEND timed out".to_owned()))
@@ -729,16 +755,16 @@ mod tests {
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
     use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
     use secrecy::{ExposeSecret, SecretString};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::time::sleep;
     use tokio::time::timeout;
     use tokio_rustls::TlsConnector;
 
     use super::{
-        append, fetch_flags, fetch_raw_message, list_all_mailboxes, noop, select_mailbox_readonly,
-        select_mailbox_readwrite, socket_timeout, uid_copy, uid_expunge, uid_move, uid_search,
-        uid_store,
+        append, fetch_flags, fetch_raw_message, list_all_mailboxes, noop, normalize_append_flags,
+        select_mailbox_readonly, select_mailbox_readwrite, socket_timeout, uid_copy, uid_expunge,
+        uid_move, uid_search, uid_store,
     };
     use crate::config::{AccountConfig, ServerConfig};
 
@@ -959,6 +985,30 @@ mod tests {
             connect_timeout_ms: 5_000,
             greeting_timeout_ms: 5_000,
             socket_timeout_ms: 15_000,
+            cursor_ttl_seconds: 600,
+            cursor_max_entries: 128,
+            attachment_download_dir: None,
+        }
+    }
+
+    /// Minimal `ServerConfig` for plaintext fake-server tests that don't need
+    /// a real (or GreenMail) IMAP backend — just timeouts.
+    fn minimal_test_config() -> ServerConfig {
+        ServerConfig {
+            accounts: BTreeMap::new(),
+            oauth2_accounts: std::collections::HashMap::new(),
+            graph_oauth2_accounts: std::collections::HashMap::new(),
+            ews_accounts: std::collections::HashMap::new(),
+            ews_oauth2_accounts: std::collections::HashMap::new(),
+            smtp_accounts: std::collections::HashMap::new(),
+            smtp_write_enabled: false,
+            smtp_save_sent: None,
+            smtp_connect_timeout_ms: 30_000,
+            smtp_send_timeout_ms: 300_000,
+            write_enabled: true,
+            connect_timeout_ms: 5_000,
+            greeting_timeout_ms: 5_000,
+            socket_timeout_ms: 5_000,
             cursor_ttl_seconds: 600,
             cursor_max_entries: 128,
             attachment_download_dir: None,
@@ -1384,6 +1434,148 @@ mod tests {
         assert!(
             raw_text.contains(&subject),
             "remaining message should contain test subject"
+        );
+    }
+
+    #[test]
+    fn normalize_append_flags_wraps_bare_flags_in_parens() {
+        assert_eq!(
+            normalize_append_flags(Some("\\Seen")).as_deref(),
+            Some("(\\Seen)")
+        );
+    }
+
+    #[test]
+    fn normalize_append_flags_passes_through_already_parenthesized_flags() {
+        assert_eq!(
+            normalize_append_flags(Some("(\\Seen \\Flagged)")).as_deref(),
+            Some("(\\Seen \\Flagged)")
+        );
+    }
+
+    #[test]
+    fn normalize_append_flags_none_stays_none() {
+        assert_eq!(normalize_append_flags(None), None);
+    }
+
+    #[test]
+    fn normalize_append_flags_empty_string_becomes_none() {
+        assert_eq!(normalize_append_flags(Some("")), None);
+    }
+
+    /// Spins up a fake plaintext IMAP server, performs LOGIN followed by
+    /// `append()` with the given `flags`, and returns the exact APPEND
+    /// command line as sent on the wire so callers can assert on its
+    /// literal format (parenthesized flags, no flags argument, etc).
+    async fn capture_append_command_line(flags_in: Option<&'static str>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener should expose its address");
+
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener
+                .accept()
+                .await
+                .expect("test server should accept a client");
+            let mut stream = BufReader::new(socket);
+
+            let login = read_imap_command(&mut stream).await;
+            reply_ok(&mut stream, &login, "LOGIN completed").await;
+
+            let append_command = read_imap_command(&mut stream).await;
+
+            // The command line ends with a literal byte count, e.g.
+            // `... {9}\r\n` — parse it so we know how many bytes (plus the
+            // trailing CRLF the client sends after the literal) to drain
+            // before replying.
+            let literal_len: usize = append_command
+                .rsplit('{')
+                .next()
+                .and_then(|s| s.trim_end().strip_suffix('}'))
+                .and_then(|s| s.parse().ok())
+                .expect("APPEND command should announce a literal length");
+
+            stream
+                .get_mut()
+                .write_all(b"+ OK\r\n")
+                .await
+                .expect("test server should send literal continuation");
+
+            let mut content = vec![0u8; literal_len + 2];
+            stream
+                .read_exact(&mut content)
+                .await
+                .expect("test server should read literal content plus trailing CRLF");
+
+            let tag = append_command
+                .split_whitespace()
+                .next()
+                .expect("APPEND command should have a tag");
+            stream
+                .get_mut()
+                .write_all(format!("{tag} OK APPEND completed\r\n").as_bytes())
+                .await
+                .expect("test server should reply to APPEND");
+
+            append_command
+        });
+
+        let tcp = TcpStream::connect(address)
+            .await
+            .expect("test client should connect");
+        let client = Client::new(super::ImapStream::Plain(tcp));
+        let test_password = ["test", "password"].join("-");
+        let mut session = client
+            .login("user@example.com", test_password)
+            .await
+            .map_err(|(error, _)| error)
+            .expect("test client should authenticate");
+
+        let config = minimal_test_config();
+        append(
+            &config,
+            &mut session,
+            "Sent Messages",
+            flags_in,
+            b"body content",
+        )
+        .await
+        .expect("APPEND should succeed");
+
+        server.await.expect("test IMAP server should finish")
+    }
+
+    #[tokio::test]
+    async fn append_wraps_bare_flags_in_parens_on_the_wire() {
+        let command = capture_append_command_line(Some("\\Seen")).await;
+        assert!(
+            command.contains("(\\Seen)"),
+            "expected wrapped flags in APPEND command, got: {command:?}"
+        );
+        assert!(
+            !command.contains(" \\Seen {"),
+            "flags must not appear unparenthesized on the wire: {command:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_leaves_already_parenthesized_flags_unchanged_on_the_wire() {
+        let command = capture_append_command_line(Some("(\\Seen \\Flagged)")).await;
+        assert!(
+            command.contains("(\\Seen \\Flagged)"),
+            "expected already-parenthesized flags to pass through unchanged: {command:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_with_no_flags_sends_no_flags_argument_on_the_wire() {
+        let command = capture_append_command_line(None).await;
+        assert!(
+            !command.contains('('),
+            "expected no flags parenthesis when flags is None: {command:?}"
         );
     }
 }

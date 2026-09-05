@@ -3045,16 +3045,23 @@ impl MailImapServer {
         .await?;
 
         // Optionally save to Sent folder via IMAP
-        if self.config.should_save_sent(&input.account_id)
-            && let Err(e) = self
+        let saved_to_sent = if self.config.should_save_sent(&input.account_id) {
+            match self
                 .save_to_sent_folder(&input.account_id, &sent.rfc822)
                 .await
-        {
-            warn!(
-                account_id = input.account_id,
-                "failed to save sent message to IMAP Sent folder: {e}"
-            );
-        }
+            {
+                Ok(()) => Some(true),
+                Err(e) => {
+                    warn!(
+                        account_id = input.account_id,
+                        "failed to save sent message to IMAP Sent folder: {e}"
+                    );
+                    Some(false)
+                }
+            }
+        } else {
+            None
+        };
 
         let recipient_count = input.to.len() + input.cc.len() + input.bcc.len();
         let summary = format!("Email sent to {recipient_count} recipient(s)");
@@ -3063,6 +3070,7 @@ impl MailImapServer {
             "account_id": input.account_id,
             "message_id": sent.message_id,
             "recipients_count": recipient_count,
+            "saved_to_sent": saved_to_sent,
         });
         Ok((summary, data))
     }
@@ -3193,16 +3201,23 @@ impl MailImapServer {
         )
         .await?;
 
-        if self.config.should_save_sent(&input.account_id)
-            && let Err(e) = self
+        let saved_to_sent = if self.config.should_save_sent(&input.account_id) {
+            match self
                 .save_to_sent_folder(&input.account_id, &sent.rfc822)
                 .await
-        {
-            warn!(
-                account_id = input.account_id,
-                "failed to save reply to IMAP Sent folder: {e}"
-            );
-        }
+            {
+                Ok(()) => Some(true),
+                Err(e) => {
+                    warn!(
+                        account_id = input.account_id,
+                        "failed to save reply to IMAP Sent folder: {e}"
+                    );
+                    Some(false)
+                }
+            }
+        } else {
+            None
+        };
 
         let summary = format!("Reply sent to {}", to.first().unwrap_or(&String::new()));
         let data = serde_json::json!({
@@ -3210,6 +3225,7 @@ impl MailImapServer {
             "account_id": input.account_id,
             "message_id": sent.message_id,
             "in_reply_to": input.message_id,
+            "saved_to_sent": saved_to_sent,
         });
         Ok((summary, data))
     }
@@ -3305,16 +3321,23 @@ impl MailImapServer {
         )
         .await?;
 
-        if self.config.should_save_sent(&input.account_id)
-            && let Err(e) = self
+        let saved_to_sent = if self.config.should_save_sent(&input.account_id) {
+            match self
                 .save_to_sent_folder(&input.account_id, &sent.rfc822)
                 .await
-        {
-            warn!(
-                account_id = input.account_id,
-                "failed to save forwarded message to IMAP Sent folder: {e}"
-            );
-        }
+            {
+                Ok(()) => Some(true),
+                Err(e) => {
+                    warn!(
+                        account_id = input.account_id,
+                        "failed to save forwarded message to IMAP Sent folder: {e}"
+                    );
+                    Some(false)
+                }
+            }
+        } else {
+            None
+        };
 
         let summary = format!("Forwarded to {} recipient(s)", input.to.len());
         let data = serde_json::json!({
@@ -3322,6 +3345,7 @@ impl MailImapServer {
             "account_id": input.account_id,
             "message_id": sent.message_id,
             "forwarded_from": input.message_id,
+            "saved_to_sent": saved_to_sent,
         });
         Ok((summary, data))
     }
