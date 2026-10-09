@@ -2640,6 +2640,7 @@ impl MailImapServer {
             from: input.from.clone(),
             to: input.to.clone(),
             subject: input.subject.clone(),
+            thread_message_id: None,
             unread_only: input.unread_only,
             last_days: input.last_days,
             start_date: input.start_date.clone(),
@@ -2750,6 +2751,7 @@ impl MailImapServer {
             from: input.from.clone(),
             to: input.to.clone(),
             subject: input.subject.clone(),
+            thread_message_id: None,
             unread_only: input.unread_only,
             last_days: input.last_days,
             start_date: input.start_date.clone(),
@@ -4025,11 +4027,15 @@ fn validate_search_input(input: &SearchMessagesInput) -> AppResult<()> {
     if let Some(v) = &input.subject {
         validate_search_text(v)?;
     }
+    if let Some(v) = &input.thread_message_id {
+        normalize_thread_message_id(v)?;
+    }
 
     let has_filters = input.query.is_some()
         || input.from.is_some()
         || input.to.is_some()
         || input.subject.is_some()
+        || input.thread_message_id.is_some()
         || input.unread_only.is_some()
         || input.last_days.is_some()
         || input.start_date.is_some()
@@ -4084,6 +4090,13 @@ fn build_search_query(input: &SearchMessagesInput) -> AppResult<String> {
     if let Some(v) = &input.subject {
         parts.push(format!("SUBJECT \"{}\"", escape_imap_quoted(v)?));
     }
+    if let Some(v) = &input.thread_message_id {
+        // The message itself, plus replies that point at it (RFC 5322 3.6.4).
+        let id = escape_imap_quoted(&normalize_thread_message_id(v)?)?;
+        parts.push(format!(
+            "OR OR HEADER Message-ID \"{id}\" HEADER In-Reply-To \"{id}\" HEADER References \"{id}\""
+        ));
+    }
     if input.unread_only.unwrap_or(false) {
         parts.push("UNSEEN".to_owned());
     }
@@ -4104,6 +4117,25 @@ fn build_search_query(input: &SearchMessagesInput) -> AppResult<String> {
     } else {
         Ok(parts.join(" "))
     }
+}
+
+/// Validate a Message-ID for `thread_message_id` and return it in its
+/// canonical `<id@host>` form. RFC 3501 HEADER search is a substring match,
+/// but iCloud only matches whole tokens: the bare id finds nothing there,
+/// while `<id@host>` matches Message-ID, In-Reply-To and References alike.
+fn normalize_thread_message_id(input: &str) -> AppResult<String> {
+    validate_search_text(input)?;
+    let id = input
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .trim();
+    if id.is_empty() || id.chars().any(char::is_whitespace) {
+        return Err(AppError::InvalidInput(
+            "thread_message_id must be a single Message-ID such as <id@host>".to_owned(),
+        ));
+    }
+    Ok(format!("<{id}>"))
 }
 
 /// Escape backslashes and quotes for IMAP quoted strings
@@ -4573,12 +4605,14 @@ fn cap_mailboxes(mut all: Vec<MailboxInfo>, max: usize) -> (Vec<MailboxInfo>, us
 /// Tests for server-side validation and encoding helpers.
 mod tests {
     use super::{
-        cap_mailboxes, encode_raw_source_base64, escape_imap_quoted, read_attachment_file,
-        sanitize_attachment_filename, select_attachment, validate_email_no_wrapper_leak,
-        validate_flag, validate_mailbox, validate_search_text,
+        build_search_query, cap_mailboxes, encode_raw_source_base64, escape_imap_quoted,
+        normalize_thread_message_id, read_attachment_file, sanitize_attachment_filename,
+        select_attachment, validate_email_no_wrapper_leak, validate_flag, validate_mailbox,
+        validate_search_input, validate_search_text,
     };
     use crate::imap::is_sent_folder_name;
     use crate::mime::ExtractedAttachment;
+    use crate::models::SearchMessagesInput;
 
     fn att(part_id: &str, filename: Option<&str>) -> ExtractedAttachment {
         ExtractedAttachment {
@@ -4863,5 +4897,65 @@ mod tests {
 
         let (kept, total, truncated) = cap_mailboxes(Vec::new(), 200);
         assert_eq!((kept.len(), total, truncated), (0, 0, false));
+    }
+
+    fn thread_search(thread_message_id: &str) -> SearchMessagesInput {
+        SearchMessagesInput {
+            account_id: "default".to_owned(),
+            mailbox: "INBOX".to_owned(),
+            cursor: None,
+            query: None,
+            from: None,
+            to: None,
+            subject: None,
+            thread_message_id: Some(thread_message_id.to_owned()),
+            unread_only: None,
+            last_days: None,
+            start_date: None,
+            end_date: None,
+            limit: 10,
+            include_snippet: false,
+            snippet_max_chars: None,
+        }
+    }
+
+    #[test]
+    fn thread_message_id_matches_message_and_replies() {
+        let query = build_search_query(&thread_search(" <02229B2A@dabasinskas.net> ")).unwrap();
+        assert_eq!(
+            query,
+            "OR OR HEADER Message-ID \"<02229B2A@dabasinskas.net>\" \
+             HEADER In-Reply-To \"<02229B2A@dabasinskas.net>\" \
+             HEADER References \"<02229B2A@dabasinskas.net>\""
+        );
+    }
+
+    #[test]
+    fn thread_message_id_combines_with_other_filters() {
+        let mut input = thread_search("abc@host");
+        input.subject = Some("kvm".to_owned());
+        let query = build_search_query(&input).unwrap();
+        assert!(query.starts_with("SUBJECT \"kvm\" OR OR HEADER Message-ID \"<abc@host>\""));
+    }
+
+    #[test]
+    fn thread_message_id_is_validated() {
+        assert_eq!(normalize_thread_message_id("<a@b>").unwrap(), "<a@b>");
+        assert_eq!(normalize_thread_message_id(" a@b ").unwrap(), "<a@b>");
+        for bad in ["<>", "a b@c", "", "a\u{7}@b"] {
+            assert!(
+                normalize_thread_message_id(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+        assert!(validate_search_input(&thread_search("<>")).is_err());
+    }
+
+    #[test]
+    fn thread_message_id_counts_as_a_filter() {
+        let mut input = thread_search("a@b");
+        assert!(validate_search_input(&input).is_ok());
+        input.cursor = Some("cursor".to_owned());
+        assert!(validate_search_input(&input).is_err());
     }
 }

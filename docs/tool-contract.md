@@ -141,6 +141,7 @@ Input:
     - `from?` (1..256)
     - `to?` (1..256)
     - `subject?` (1..256)
+    - `thread_message_id?` (1..256): an RFC 5322 Message-ID (`<id@host>`, brackets optional); matches that message and every message whose `In-Reply-To` or `References` carries it
     - `unread_only?` (boolean)
     - `last_days?` (1..365)
     - `start_date?` (`YYYY-MM-DD`)
@@ -153,6 +154,7 @@ Validation:
 - `cursor` cannot be combined with search criteria.
 - `last_days` cannot be combined with `start_date`/`end_date`.
 - `start_date <= end_date`.
+- `thread_message_id` must be a single token without whitespace; it is always searched in its bracketed `<id@host>` form, because some servers (iCloud) match HEADER searches on whole tokens only.
 - Search text fields and mailbox values must not contain ASCII control characters.
 - Searches matching more than 20,000 messages are rejected; narrow filters and retry.
 

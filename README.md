@@ -477,7 +477,7 @@ Get your token in 1 minute with device code flow. See [Account Setup Guide](docs
 | `imap_verify_account` | Test connectivity and auth |
 | `imap_list_mailboxes` | List folders |
 | `imap_mailbox_status` | Message counts |
-| `imap_search_messages` | Search with cursor pagination |
+| `imap_search_messages` | Search with cursor pagination; `thread_message_id` finds a message and its replies |
 | `imap_get_message` | Parsed message (text, HTML, attachments) |
 | `imap_get_message_raw` | RFC822 source |
 | `imap_get_attachment` | Download one attachment to disk (bypasses the raw size cap) |

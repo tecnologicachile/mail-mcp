@@ -199,6 +199,10 @@ pub struct SearchMessagesInput {
     pub to: Option<String>,
     /// Filter by Subject header
     pub subject: Option<String>,
+    /// Find a conversation by its RFC 5322 Message-ID (angle brackets optional):
+    /// matches the message itself and every message whose In-Reply-To or
+    /// References header carries it, i.e. the replies in this mailbox
+    pub thread_message_id: Option<String>,
     /// Filter to unread messages only
     pub unread_only: Option<bool>,
     /// Filter to messages from last N days
