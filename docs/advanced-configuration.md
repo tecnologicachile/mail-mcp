@@ -39,6 +39,15 @@ MAIL_IMAP_CURSOR_MAX_ENTRIES=512
 MAIL_IMAP_MAX_MAILBOXES=1000
 ```
 
+### Search Across All Mailboxes
+
+`imap_search_all_mailboxes` runs one search in every selectable mailbox, spread over a few parallel IMAP connections. On iCloud each mailbox costs roughly one second (EXAMINE + UID SEARCH), so ~220 folders take about a minute with 4 connections and about half that with 8. Providers cap concurrent connections per account; 8 stayed well within iCloud's limit in testing.
+
+```bash
+# Default: 4 (clamped to 1..=8)
+MAIL_IMAP_SEARCH_CONCURRENCY=8
+```
+
 ## Timeout Configuration
 
 All timeouts are in milliseconds. Adjust based on network conditions and server performance.

@@ -221,6 +221,53 @@ pub struct SearchMessagesInput {
     pub snippet_max_chars: Option<usize>,
 }
 
+/// Input: search every mailbox of an account
+///
+/// Used by `imap_search_all_mailboxes`. Takes the same criteria as
+/// `imap_search_messages` (at least one is required) and searches every
+/// selectable mailbox, optionally narrowed by name.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SearchAllMailboxesInput {
+    /// Account identifier (defaults to `"default"`)
+    #[serde(default = "default_account_id")]
+    pub account_id: String,
+    /// Full-text search query
+    pub query: Option<String>,
+    /// Filter by From header
+    pub from: Option<String>,
+    /// Filter by To header
+    pub to: Option<String>,
+    /// Filter by Subject header
+    pub subject: Option<String>,
+    /// Find a conversation by its RFC 5322 Message-ID (angle brackets optional):
+    /// the message itself and every reply that references it, in any mailbox
+    pub thread_message_id: Option<String>,
+    /// Filter to unread messages only
+    pub unread_only: Option<bool>,
+    /// Filter to messages from last N days
+    pub last_days: Option<u16>,
+    /// Filter to messages on or after this date (YYYY-MM-DD)
+    pub start_date: Option<String>,
+    /// Filter to messages before this date (YYYY-MM-DD)
+    pub end_date: Option<String>,
+    /// Only search these mailboxes and their sub-mailboxes (exact names)
+    pub include_mailboxes: Option<Vec<String>>,
+    /// Skip these mailboxes and their sub-mailboxes (exact names, e.g. `Junk`)
+    pub exclude_mailboxes: Option<Vec<String>>,
+    /// Maximum messages to return, newest first across all mailboxes (1..200, default 50)
+    #[serde(default = "default_search_all_limit")]
+    pub limit: usize,
+    /// Include subject snippet in results
+    #[serde(default)]
+    pub include_snippet: bool,
+    /// Maximum snippet length (50..500, requires `include_snippet=true`)
+    pub snippet_max_chars: Option<usize>,
+}
+
+fn default_search_all_limit() -> usize {
+    50
+}
+
 /// Input: get parsed message details
 ///
 /// Used by `imap_get_message`. Supports bounded enrichment (char limits,

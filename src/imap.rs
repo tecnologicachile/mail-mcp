@@ -1365,6 +1365,7 @@ mod tests {
             cursor_ttl_seconds: 600,
             cursor_max_entries: 128,
             max_mailboxes: crate::config::DEFAULT_MAX_MAILBOXES,
+            search_concurrency: crate::config::DEFAULT_SEARCH_CONCURRENCY,
             attachment_download_dir: None,
             attachment_upload_dir: None,
         }
@@ -1391,6 +1392,7 @@ mod tests {
             cursor_ttl_seconds: 600,
             cursor_max_entries: 128,
             max_mailboxes: crate::config::DEFAULT_MAX_MAILBOXES,
+            search_concurrency: crate::config::DEFAULT_SEARCH_CONCURRENCY,
             attachment_download_dir: None,
             attachment_upload_dir: None,
         }

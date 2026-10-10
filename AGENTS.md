@@ -236,6 +236,10 @@ The repository publishes GitHub Release archives/installers via cargo-dist.
 - `MAIL_IMAP_MAX_MAILBOXES`: cap on how many mailboxes `imap_list_mailboxes`
   returns (default `200`, clamped to `1..=10000`). The response always carries
   `total` and `truncated`, so a client can tell a capped list from a complete one.
+- `MAIL_IMAP_SEARCH_CONCURRENCY`: parallel IMAP connections used by
+  `imap_search_all_mailboxes` (default `4`, clamped to `1..=8`). Each connection
+  walks its share of the mailboxes with EXAMINE + UID SEARCH; providers cap
+  concurrent connections per account, so stay well below their limit.
 
 ## Quick Pre-Commit Checklist
 

@@ -105,6 +105,9 @@ pub struct ServerConfig {
     /// Maximum number of mailboxes `imap_list_mailboxes` returns
     /// (`MAIL_IMAP_MAX_MAILBOXES`, clamped to `1..=MAX_MAILBOXES_LIMIT`)
     pub max_mailboxes: usize,
+    /// Parallel IMAP connections used by `imap_search_all_mailboxes`
+    /// (`MAIL_IMAP_SEARCH_CONCURRENCY`, clamped to `1..=MAX_SEARCH_CONCURRENCY`)
+    pub search_concurrency: usize,
     /// Default directory where `imap_get_attachment` saves downloaded
     /// attachments. `None` = fall back to the system temp dir. A per-call
     /// `output_dir` argument overrides this.
@@ -197,6 +200,11 @@ impl ServerConfig {
                 "MAIL_IMAP_MAX_MAILBOXES",
                 DEFAULT_MAX_MAILBOXES,
             )?),
+            search_concurrency: parse_usize_env(
+                "MAIL_IMAP_SEARCH_CONCURRENCY",
+                DEFAULT_SEARCH_CONCURRENCY,
+            )?
+            .clamp(1, MAX_SEARCH_CONCURRENCY),
             attachment_download_dir: env::var("MAIL_ATTACHMENT_DOWNLOAD_DIR")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
@@ -766,6 +774,13 @@ fn parse_u64_env(key: &str, default: u64) -> AppResult<u64> {
     }
 }
 
+/// Default for `MAIL_IMAP_SEARCH_CONCURRENCY`.
+pub const DEFAULT_SEARCH_CONCURRENCY: usize = 4;
+
+/// Upper bound for `MAIL_IMAP_SEARCH_CONCURRENCY`; providers cap concurrent
+/// IMAP connections per account (iCloud and Gmail at around 10-15).
+pub const MAX_SEARCH_CONCURRENCY: usize = 8;
+
 /// Default for `MAIL_IMAP_MAX_MAILBOXES` (the historical fixed limit).
 pub const DEFAULT_MAX_MAILBOXES: usize = 200;
 
@@ -874,6 +889,7 @@ mod tests {
             cursor_ttl_seconds: 600,
             cursor_max_entries: 512,
             max_mailboxes: DEFAULT_MAX_MAILBOXES,
+            search_concurrency: super::DEFAULT_SEARCH_CONCURRENCY,
             attachment_download_dir: None,
             attachment_upload_dir: None,
         }

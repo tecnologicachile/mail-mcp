@@ -478,6 +478,7 @@ Get your token in 1 minute with device code flow. See [Account Setup Guide](docs
 | `imap_list_mailboxes` | List folders |
 | `imap_mailbox_status` | Message counts |
 | `imap_search_messages` | Search with cursor pagination; `thread_message_id` finds a message and its replies |
+| `imap_search_all_mailboxes` | Same criteria in every mailbox at once (e.g. a whole conversation spread over INBOX, Sent and project folders), newest first, labelled with the mailbox |
 | `imap_get_message` | Parsed message (text, HTML, attachments) |
 | `imap_get_message_raw` | RFC822 source |
 | `imap_get_attachment` | Download one attachment to disk (bypasses the raw size cap) |
@@ -675,6 +676,7 @@ Use `account_id` in tool calls: `"account_id": "gmail"`, `"account_id": "icloud"
 | `MAIL_IMAP_GREETING_TIMEOUT_MS` | 15000 | TLS/greeting timeout |
 | `MAIL_IMAP_SOCKET_TIMEOUT_MS` | 300000 | Socket I/O timeout |
 | `MAIL_IMAP_MAX_MAILBOXES` | 200 | Max mailboxes `imap_list_mailboxes` returns (1–10000); the response reports `total` and `truncated` |
+| `MAIL_IMAP_SEARCH_CONCURRENCY` | 4 | Parallel IMAP connections for `imap_search_all_mailboxes` (1–8) |
 | `MAIL_MCP_TRANSPORT` | stdio | `stdio`, or `http` to serve MCP streamable HTTP (see [Remote HTTP transport](docs/advanced-configuration.md#remote-http-transport)) |
 | `MAIL_MCP_HTTP_HOST` | 127.0.0.1 | HTTP bind address (IP literal) |
 | `MAIL_MCP_HTTP_PORT` | 8000 | HTTP bind port |

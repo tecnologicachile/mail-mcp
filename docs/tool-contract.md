@@ -181,6 +181,34 @@ Output `data`:
 - `next_cursor?` (string)
 - `has_more` (boolean)
 
+### 4b) `imap_search_all_mailboxes`
+
+Purpose: run one search in every selectable mailbox of an account and return the newest matches, each labelled with its mailbox. Built for providers without an "All Mail" folder (iCloud), where one conversation is spread over INBOX, Sent Messages and project folders.
+
+Input:
+- `account_id` (optional)
+- search criteria, same fields and validation as `imap_search_messages` (`query`, `from`, `to`, `subject`, `thread_message_id`, `unread_only`, `last_days`, `start_date`, `end_date`); at least one is required
+- `include_mailboxes?` (string[]): only these mailboxes and their sub-mailboxes (exact names)
+- `exclude_mailboxes?` (string[]): skip these mailboxes and their sub-mailboxes; wins over `include_mailboxes`
+- `limit` (optional, 1..200, default 50)
+- `include_snippet?`, `snippet_max_chars?` as in `imap_search_messages`
+
+Behaviour:
+- Mailboxes marked `\Noselect` are skipped.
+- The work is spread over `MAIL_IMAP_SEARCH_CONCURRENCY` connections; each runs EXAMINE + UID SEARCH per mailbox. A mailbox that fails is reported in `mailboxes_failed` and `issues` and does not abort the search.
+- No cursor: each mailbox contributes at most `limit` newest matches, and the merged list is sorted by Date header (newest first) and cut to `limit`.
+
+Output `data`:
+- `status`: `ok|partial|failed`
+- `issues`: array of diagnostic issues
+- `account_id`
+- `mailboxes_in_scope`: selectable mailboxes after include/exclude
+- `mailboxes_searched`: mailboxes searched successfully
+- `mailboxes_failed`: string[]
+- `total`: matches across all searched mailboxes
+- `returned`, `truncated` (`true` when `total` exceeds `returned`)
+- `messages`: array of message summaries (same shape as `imap_search_messages`; `mailbox` names the folder, `message_id` works with `imap_get_message`)
+
 ### 5) `imap_get_message`
 
 Purpose: return parsed message details with optional bounded enrichments.
@@ -365,6 +393,7 @@ Server-wide:
 - `MAIL_IMAP_GREETING_TIMEOUT_MS` (default `15000`)
 - `MAIL_IMAP_SOCKET_TIMEOUT_MS` (default `300000`)
 - `MAIL_IMAP_MAX_MAILBOXES` (default `200`, clamped to `1..=10000`): cap for `imap_list_mailboxes`
+- `MAIL_IMAP_SEARCH_CONCURRENCY` (default `4`, clamped to `1..=8`): parallel connections for `imap_search_all_mailboxes`
 
 Transport (see `docs/advanced-configuration.md#remote-http-transport`):
 

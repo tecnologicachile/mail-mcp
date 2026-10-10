@@ -27,15 +27,18 @@ use crate::models::{
     BulkMoveInput, BulkUpdateFlagsInput, CopyMessageInput, CreateMailboxInput, DeleteMailboxInput,
     DeleteMessageInput, GetAttachmentInput, GetMessageInput, GetMessageRawInput,
     GraphSendMessageInput, MailboxInfo, MailboxStatusInfo, MailboxStatusInput, MessageDetail,
-    MessageSummary, Meta, MoveMessageInput, RenameMailboxInput, SearchAndDeleteInput,
-    SearchAndMoveInput, SearchMessagesInput, SmtpForwardMessageInput, SmtpReplyMessageInput,
-    SmtpSendMessageInput, SmtpVerifyAccountInput, ToolEnvelope, UpdateMessageFlagsInput,
+    MessageSummary, Meta, MoveMessageInput, RenameMailboxInput, SearchAllMailboxesInput,
+    SearchAndDeleteInput, SearchAndMoveInput, SearchMessagesInput, SmtpForwardMessageInput,
+    SmtpReplyMessageInput, SmtpSendMessageInput, SmtpVerifyAccountInput, ToolEnvelope,
+    UpdateMessageFlagsInput,
 };
 use crate::pagination::{CursorEntry, CursorStore};
 use crate::smtp;
 
 /// Maximum messages per search result page
 const MAX_SEARCH_LIMIT: usize = 50;
+/// Maximum messages `imap_search_all_mailboxes` returns in one call
+const MAX_SEARCH_ALL_LIMIT: usize = 200;
 /// Maximum attachments to return per message
 const MAX_ATTACHMENTS: usize = 50;
 /// Maximum UID search results stored in a cursor snapshot
@@ -290,6 +293,37 @@ impl MailImapServer {
             Ok((summary, serialized))
         });
         finalize_tool(started, "imap_search_messages", result)
+    }
+
+    /// Tool: Search every mailbox of an account in one call
+    ///
+    /// Same criteria as `imap_search_messages`, run in every selectable
+    /// mailbox over a few parallel IMAP connections. Built for providers
+    /// without an "All Mail" folder (iCloud), where one conversation is
+    /// spread over INBOX, Sent and project folders.
+    #[tool(
+        name = "imap_search_all_mailboxes",
+        description = "Search every mailbox of an account in one call (e.g. a whole conversation via thread_message_id); results are newest first and labelled with their mailbox"
+    )]
+    async fn search_all_mailboxes(
+        &self,
+        Parameters(input): Parameters<SearchAllMailboxesInput>,
+    ) -> Result<Json<ToolEnvelope<serde_json::Value>>, ErrorData> {
+        let started = Instant::now();
+        let result = self
+            .search_all_mailboxes_impl(input)
+            .await
+            .and_then(|data| {
+                let summary = format!(
+                    "{} message(s) returned from {} mailbox(es) searched",
+                    data.messages.len(),
+                    data.mailboxes_searched
+                );
+                let serialized = serde_json::to_value(data)
+                    .map_err(|e| AppError::Internal(format!("serialization failure: {e}")))?;
+                Ok((summary, serialized))
+            });
+        finalize_tool(started, "imap_search_all_mailboxes", result)
     }
 
     /// Tool: Get parsed message details
@@ -1012,6 +1046,36 @@ struct SearchResultData {
     has_more: bool,
 }
 
+/// Result of `imap_search_all_mailboxes`
+#[derive(Debug, serde::Serialize)]
+struct SearchAllMailboxesData {
+    status: String,
+    issues: Vec<ToolIssue>,
+    account_id: String,
+    /// Selectable mailboxes in scope after include/exclude filtering
+    mailboxes_in_scope: usize,
+    /// Mailboxes that were searched successfully
+    mailboxes_searched: usize,
+    /// Mailboxes that could not be searched (see `issues`)
+    mailboxes_failed: Vec<String>,
+    /// Matching messages across all searched mailboxes
+    total: usize,
+    returned: usize,
+    /// `true` when more messages matched than were returned
+    truncated: bool,
+    messages: Vec<MessageSummary>,
+}
+
+/// What one worker connection found in its share of the mailboxes
+#[derive(Default)]
+struct MailboxScanOutcome {
+    messages: Vec<MessageSummary>,
+    issues: Vec<ToolIssue>,
+    searched: usize,
+    failed: Vec<String>,
+    total: usize,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 struct NextAction {
     instruction: String,
@@ -1211,6 +1275,201 @@ impl MailImapServer {
             "total": total,
             "truncated": truncated,
         }))
+    }
+
+    async fn search_all_mailboxes_impl(
+        &self,
+        input: SearchAllMailboxesInput,
+    ) -> AppResult<SearchAllMailboxesData> {
+        validate_account_id(&input.account_id)?;
+        let criteria = SearchMessagesInput {
+            account_id: input.account_id.clone(),
+            mailbox: "INBOX".to_owned(), // placeholder; validation needs one
+            cursor: None,
+            query: input.query.clone(),
+            from: input.from.clone(),
+            to: input.to.clone(),
+            subject: input.subject.clone(),
+            thread_message_id: input.thread_message_id.clone(),
+            unread_only: input.unread_only,
+            last_days: input.last_days,
+            start_date: input.start_date.clone(),
+            end_date: input.end_date.clone(),
+            limit: 1,
+            include_snippet: input.include_snippet,
+            snippet_max_chars: input.snippet_max_chars,
+        };
+        validate_search_input(&criteria)?;
+        let query = build_search_query(&criteria)?;
+        if query == "ALL" {
+            return Err(AppError::InvalidInput(
+                "imap_search_all_mailboxes needs at least one search criterion".to_owned(),
+            ));
+        }
+        validate_chars(input.limit, 1, MAX_SEARCH_ALL_LIMIT, "limit")?;
+        let include = input.include_mailboxes.clone().unwrap_or_default();
+        let exclude = input.exclude_mailboxes.clone().unwrap_or_default();
+        for name in include.iter().chain(&exclude) {
+            validate_mailbox(name)?;
+        }
+        let snippet_max_chars = input.snippet_max_chars.unwrap_or(200).clamp(50, 500);
+
+        let account = self.config.get_account(&input.account_id)?;
+        let mut session =
+            imap::connect_authenticated(&self.config, account, self.token_manager.as_deref())
+                .await?;
+        let listed = imap::list_all_mailboxes(&self.config, &mut session).await?;
+        let in_scope: Vec<String> = listed
+            .iter()
+            .filter(|item| {
+                !item
+                    .attributes()
+                    .iter()
+                    .any(|a| matches!(a, async_imap::types::NameAttribute::NoSelect))
+            })
+            .filter(|item| mailbox_in_scope(item.name(), item.delimiter(), &include, &exclude))
+            .map(|item| item.name().to_owned())
+            .collect();
+        drop(listed);
+        let mailboxes_in_scope = in_scope.len();
+
+        let mut shares = partition_round_robin(in_scope, self.config.search_concurrency);
+        let first_share = if shares.is_empty() {
+            Vec::new()
+        } else {
+            shares.remove(0)
+        };
+        let options = (&input.account_id, input.include_snippet, snippet_max_chars);
+        let mut scans =
+            vec![self.scan_mailboxes(Some(session), first_share, &query, input.limit, options)];
+        for share in shares {
+            scans.push(self.scan_mailboxes(None, share, &query, input.limit, options));
+        }
+        let outcomes = futures::future::join_all(scans).await;
+
+        let mut merged = MailboxScanOutcome::default();
+        for outcome in outcomes {
+            merged.messages.extend(outcome.messages);
+            merged.issues.extend(outcome.issues);
+            merged.searched += outcome.searched;
+            merged.failed.extend(outcome.failed);
+            merged.total += outcome.total;
+        }
+        sort_newest_first(&mut merged.messages);
+        merged.messages.truncate(input.limit);
+        merged.failed.sort();
+
+        let status = status_from_counts(merged.issues.is_empty(), merged.searched > 0);
+        log_runtime_issues(
+            "imap_search_all_mailboxes",
+            status,
+            &input.account_id,
+            None,
+            &merged.issues,
+        );
+        Ok(SearchAllMailboxesData {
+            status: status.to_owned(),
+            issues: merged.issues,
+            account_id: input.account_id,
+            mailboxes_in_scope,
+            mailboxes_searched: merged.searched,
+            mailboxes_failed: merged.failed,
+            total: merged.total,
+            returned: merged.messages.len(),
+            truncated: merged.total > merged.messages.len(),
+            messages: merged.messages,
+        })
+    }
+
+    /// Search `mailboxes` one after another on a single connection (a fresh
+    /// one unless `session` is given), keeping the newest `limit` matches of
+    /// each mailbox. Failures are recorded per mailbox and never abort the scan.
+    async fn scan_mailboxes(
+        &self,
+        session: Option<imap::ImapSession>,
+        mailboxes: Vec<String>,
+        query: &str,
+        limit: usize,
+        (account_id, include_snippet, snippet_max_chars): (&String, bool, usize),
+    ) -> MailboxScanOutcome {
+        let mut outcome = MailboxScanOutcome::default();
+        if mailboxes.is_empty() {
+            return outcome;
+        }
+        let mut session = match session {
+            Some(session) => session,
+            None => {
+                let connected = match self.config.get_account(account_id) {
+                    Ok(account) => {
+                        imap::connect_authenticated(
+                            &self.config,
+                            account,
+                            self.token_manager.as_deref(),
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                };
+                match connected {
+                    Ok(session) => session,
+                    Err(error) => {
+                        outcome
+                            .issues
+                            .push(ToolIssue::from_error("connect_authenticated", &error));
+                        outcome.failed = mailboxes;
+                        return outcome;
+                    }
+                }
+            }
+        };
+        for mailbox in mailboxes {
+            let uidvalidity =
+                match imap::select_mailbox_readonly(&self.config, &mut session, &mailbox).await {
+                    Ok(uidvalidity) => uidvalidity,
+                    Err(error) => {
+                        outcome
+                            .issues
+                            .push(ToolIssue::from_error(&format!("examine {mailbox}"), &error));
+                        outcome.failed.push(mailbox);
+                        continue;
+                    }
+                };
+            let uids = match imap::uid_search(&self.config, &mut session, query).await {
+                Ok(uids) => uids,
+                Err(error) => {
+                    outcome.issues.push(ToolIssue::from_error(
+                        &format!("uid_search {mailbox}"),
+                        &error,
+                    ));
+                    outcome.failed.push(mailbox);
+                    continue;
+                }
+            };
+            outcome.searched += 1;
+            outcome.total += uids.len();
+            if uids.is_empty() {
+                continue;
+            }
+            // uid_search returns newest first; a mailbox can contribute at most `limit`
+            let newest: Vec<u32> = uids.into_iter().take(limit).collect();
+            let built = build_message_summaries(
+                &self.config,
+                &mut session,
+                &newest,
+                SummaryBuildOptions {
+                    account_id,
+                    mailbox: &mailbox,
+                    uidvalidity,
+                    include_snippet,
+                    snippet_max_chars,
+                },
+            )
+            .await;
+            outcome.messages.extend(built.messages);
+            outcome.issues.extend(built.issues);
+        }
+        let _ = session.logout().await;
+        outcome
     }
 
     async fn search_messages_impl(
@@ -4119,6 +4378,47 @@ fn build_search_query(input: &SearchMessagesInput) -> AppResult<String> {
     }
 }
 
+/// Is `name` covered by the include/exclude lists? An entry covers the
+/// mailbox with that exact name and everything below it. An empty include
+/// list means every mailbox; exclude wins over include.
+fn mailbox_in_scope(
+    name: &str,
+    delimiter: Option<&str>,
+    include: &[String],
+    exclude: &[String],
+) -> bool {
+    let covers = |entry: &String| {
+        name == entry
+            || delimiter.is_some_and(|d| {
+                name.strip_prefix(entry.as_str())
+                    .is_some_and(|rest| rest.starts_with(d))
+            })
+    };
+    (include.is_empty() || include.iter().any(covers)) && !exclude.iter().any(covers)
+}
+
+/// Deal `items` into at most `workers` non-empty groups, round robin, so
+/// each connection gets a similar mix of big and small mailboxes.
+fn partition_round_robin<T>(items: Vec<T>, workers: usize) -> Vec<Vec<T>> {
+    let workers = workers.max(1).min(items.len());
+    let mut groups: Vec<Vec<T>> = (0..workers).map(|_| Vec::new()).collect();
+    for (i, item) in items.into_iter().enumerate() {
+        groups[i % workers].push(item);
+    }
+    groups
+}
+
+/// Newest first by the Date header; messages without a parsable date last.
+fn sort_newest_first(messages: &mut [MessageSummary]) {
+    let key = |m: &MessageSummary| {
+        m.date
+            .as_deref()
+            .and_then(|d| mailparse::dateparse(d).ok())
+            .unwrap_or(i64::MIN)
+    };
+    messages.sort_by_key(|m| std::cmp::Reverse(key(m)));
+}
+
 /// Validate a Message-ID for `thread_message_id` and return it in its
 /// canonical `<id@host>` form. RFC 3501 HEADER search is a substring match,
 /// but iCloud only matches whole tokens: the bare id finds nothing there,
@@ -4606,13 +4906,14 @@ fn cap_mailboxes(mut all: Vec<MailboxInfo>, max: usize) -> (Vec<MailboxInfo>, us
 mod tests {
     use super::{
         build_search_query, cap_mailboxes, encode_raw_source_base64, escape_imap_quoted,
-        normalize_thread_message_id, read_attachment_file, sanitize_attachment_filename,
-        select_attachment, validate_email_no_wrapper_leak, validate_flag, validate_mailbox,
-        validate_search_input, validate_search_text,
+        mailbox_in_scope, normalize_thread_message_id, partition_round_robin, read_attachment_file,
+        sanitize_attachment_filename, select_attachment, sort_newest_first,
+        validate_email_no_wrapper_leak, validate_flag, validate_mailbox, validate_search_input,
+        validate_search_text,
     };
     use crate::imap::is_sent_folder_name;
     use crate::mime::ExtractedAttachment;
-    use crate::models::SearchMessagesInput;
+    use crate::models::{MessageSummary, SearchMessagesInput};
 
     fn att(part_id: &str, filename: Option<&str>) -> ExtractedAttachment {
         ExtractedAttachment {
@@ -4957,5 +5258,78 @@ mod tests {
         assert!(validate_search_input(&input).is_ok());
         input.cursor = Some("cursor".to_owned());
         assert!(validate_search_input(&input).is_err());
+    }
+
+    #[test]
+    fn mailbox_scope_covers_children_and_exclude_wins() {
+        let v = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        let slash = Some("/");
+        assert!(mailbox_in_scope("INBOX", slash, &[], &[]));
+        assert!(mailbox_in_scope(
+            "Projects/2025. Fence",
+            slash,
+            &v(&["Projects"]),
+            &[]
+        ));
+        assert!(!mailbox_in_scope(
+            "Projects2",
+            slash,
+            &v(&["Projects"]),
+            &[]
+        ));
+        assert!(!mailbox_in_scope("INBOX", slash, &v(&["Projects"]), &[]));
+        assert!(!mailbox_in_scope("Junk", slash, &[], &v(&["Junk"])));
+        assert!(!mailbox_in_scope(
+            "Projects/Old",
+            slash,
+            &v(&["Projects"]),
+            &v(&["Projects/Old"])
+        ));
+        assert!(mailbox_in_scope("Projects", None, &v(&["Projects"]), &[]));
+        assert!(!mailbox_in_scope(
+            "Projects/Sub",
+            None,
+            &v(&["Projects"]),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn partition_deals_round_robin_without_empty_groups() {
+        assert_eq!(
+            partition_round_robin((1..=7).collect(), 3),
+            vec![vec![1, 4, 7], vec![2, 5], vec![3, 6]]
+        );
+        assert_eq!(partition_round_robin(vec![1, 2], 8), vec![vec![1], vec![2]]);
+        assert!(partition_round_robin(Vec::<u8>::new(), 4).is_empty());
+        assert_eq!(partition_round_robin(vec![1, 2], 0), vec![vec![1, 2]]);
+    }
+
+    #[test]
+    fn sorts_newest_first_with_undated_last() {
+        let summary = |uid: u32, date: Option<&str>| MessageSummary {
+            message_id: format!("imap:default:INBOX:1:{uid}"),
+            message_uri: String::new(),
+            message_raw_uri: String::new(),
+            mailbox: "INBOX".to_owned(),
+            uidvalidity: 1,
+            uid,
+            date: date.map(str::to_owned),
+            from: None,
+            subject: None,
+            flags: None,
+            snippet: None,
+        };
+        let mut messages = vec![
+            summary(1, Some("Tue, 6 Oct 2026 18:25:14 +0300")),
+            summary(2, None),
+            summary(3, Some("Thu, 8 Oct 2026 08:17:38 +0300")),
+            summary(4, Some("Wed, 7 Oct 2026 10:45:41 +0300")),
+        ];
+        sort_newest_first(&mut messages);
+        assert_eq!(
+            messages.iter().map(|m| m.uid).collect::<Vec<_>>(),
+            vec![3, 4, 1, 2]
+        );
     }
 }
