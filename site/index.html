@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mail-mcp — Email MCP server for AI agents (IMAP, SMTP, Graph, EWS)</title>
+<meta name="description" content="Open-source MCP server in Rust that lets AI agents read, search and send email over IMAP, SMTP, Microsoft Graph and EWS. Gmail, Microsoft 365, Outlook, iCloud.">
+<link rel="canonical" href="https://mail-mcp.tecnologicachile.cl/">
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+<meta name="author" content="Tecnológica Chile">
+<meta name="theme-color" content="#0f766e">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="alternate" type="text/plain" title="LLM summary" href="/llms.txt">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="mail-mcp">
+<meta property="og:title" content="mail-mcp — Email MCP server for AI agents">
+<meta property="og:description" content="Open-source MCP server in Rust: 31 email tools over IMAP, SMTP, Microsoft Graph and EWS, with OAuth2 and multi-account support.">
+<meta property="og:url" content="https://mail-mcp.tecnologicachile.cl/">
+<meta property="og:image" content="https://mail-mcp.tecnologicachile.cl/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="mail-mcp: email MCP server for AI agents">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="mail-mcp — Email MCP server for AI agents">
+<meta name="twitter:description" content="Open-source MCP server in Rust: 31 email tools over IMAP, SMTP, Microsoft Graph and EWS.">
+<meta name="twitter:image" content="https://mail-mcp.tecnologicachile.cl/og.png">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "mail-mcp",
+  "alternateName": ["mailmcp", "mail mcp", "email MCP server"],
+  "description": "Open-source Model Context Protocol (MCP) server written in Rust that gives AI agents email access over IMAP, SMTP, Microsoft Graph API and Exchange Web Services (EWS), with OAuth2 and multi-account support.",
+  "url": "https://mail-mcp.tecnologicachile.cl/",
+  "applicationCategory": "DeveloperApplication",
+  "applicationSubCategory": "MCP server",
+  "operatingSystem": "Linux, macOS, Windows",
+  "softwareVersion": "0.4.16",
+  "license": "https://opensource.org/licenses/MIT",
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "downloadUrl": "https://github.com/tecnologicachile/mail-mcp/releases/latest",
+  "installUrl": "https://github.com/tecnologicachile/mail-mcp#manual-setup-2-minutes",
+  "softwareHelp": "https://github.com/tecnologicachile/mail-mcp#readme",
+  "programmingLanguage": "Rust",
+  "keywords": "MCP, Model Context Protocol, email, IMAP, SMTP, Microsoft Graph, EWS, Exchange, OAuth2, Claude, Cursor, AI agents, Rust",
+  "featureList": [
+    "31 MCP tools to read, search, send, reply, forward, move, flag and delete email",
+    "IMAP and SMTP for any standard mail server",
+    "Microsoft Graph API and Exchange Web Services for Microsoft 365 and Outlook.com",
+    "Native OAuth2 (XOAUTH2) with token refresh",
+    "Multiple accounts in one server",
+    "Write and send operations disabled until explicitly enabled",
+    "Attachment download to disk and upload from disk",
+    "stdio transport by default, optional streamable HTTP"
+  ],
+  "codeRepository": "https://github.com/tecnologicachile/mail-mcp",
+  "sameAs": ["https://github.com/tecnologicachile/mail-mcp"],
+  "author": {
+    "@type": "Organization",
+    "name": "Tecnológica Chile",
+    "url": "https://tecnologicachile.cl"
+  }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "How do I give Claude access to my email?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Install mail-mcp, add it as an MCP server in Claude Code, Claude Desktop or any MCP client, and configure your account with environment variables. The agent then gets tools to search, read, send, reply, forward and organize email." }
+    },
+    {
+      "@type": "Question",
+      "name": "Does mail-mcp work with Outlook.com, Hotmail and Microsoft 365?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. Microsoft blocks SMTP on personal accounts, so mail-mcp sends through Microsoft Graph API or Exchange Web Services (EWS) instead. EWS is the simplest option: one OAuth2 token covers reading and sending, and it works on tenants that block Graph and IMAP." }
+    },
+    {
+      "@type": "Question",
+      "name": "Can the AI agent send email, or only read it?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Both. Reading is enabled by default. Moving, deleting and sending stay disabled until you set MAIL_IMAP_WRITE_ENABLED=true and MAIL_SMTP_WRITE_ENABLED=true, and deletes also require confirm: true." }
+    },
+    {
+      "@type": "Question",
+      "name": "Does mail-mcp support Gmail, iCloud, Zoho and Fastmail?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. Any provider that offers IMAP and SMTP works, including Gmail (with an app password or OAuth2), Apple iCloud, Zoho, Fastmail and self-hosted mail servers." }
+    },
+    {
+      "@type": "Question",
+      "name": "Does it support OAuth2?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. mail-mcp implements XOAUTH2 natively for IMAP and SMTP, plus OAuth2 for Microsoft Graph and EWS, with cached tokens that refresh automatically." }
+    },
+    {
+      "@type": "Question",
+      "name": "Is there a Docker image?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes: ghcr.io/tecnologicachile/mail-mcp. Run it with docker run --rm -i --env-file .env ghcr.io/tecnologicachile/mail-mcp. Prebuilt binaries for Linux, macOS and Windows are also available on GitHub Releases." }
+    },
+    {
+      "@type": "Question",
+      "name": "Is mail-mcp free?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. mail-mcp is open source under the MIT license and runs on your own machine, so your credentials and mail never go through a third-party service." }
+    }
+  ]
+}
+</script>
+
+<style>
+:root{--bg:#fbfbfa;--fg:#1c1f23;--muted:#5b6470;--line:#e3e5e8;--card:#ffffff;--accent:#0f766e;--accent-soft:#e6f4f2;--code:#f3f4f6}
+@media (prefers-color-scheme:dark){:root{--bg:#111416;--fg:#e8eaed;--muted:#9aa3ad;--line:#2a2f35;--card:#171b1e;--accent:#2dd4bf;--accent-soft:#12302d;--code:#1e2328}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+a{color:var(--accent)}
+.wrap{max-width:960px;margin:0 auto;padding:0 20px}
+header.top{border-bottom:1px solid var(--line)}
+header.top .wrap{display:flex;align-items:center;justify-content:space-between;height:60px}
+.brand{font-weight:700;font-size:18px;color:var(--fg);text-decoration:none;display:flex;gap:10px;align-items:center}
+nav a{color:var(--muted);text-decoration:none;margin-left:20px;font-size:15px}
+nav a:hover{color:var(--fg)}
+.hero{padding:64px 0 40px}
+.hero h1{font-size:clamp(32px,5vw,48px);line-height:1.15;margin:0 0 16px;letter-spacing:-.02em}
+.hero p.lead{font-size:19px;color:var(--muted);max-width:720px;margin:0 0 28px}
+.btns{display:flex;flex-wrap:wrap;gap:12px}
+.btn{display:inline-block;padding:11px 18px;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px;border:1px solid var(--line);color:var(--fg);background:var(--card)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+@media (prefers-color-scheme:dark){.btn.primary{color:#062a26}}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:28px;padding:0;list-style:none}
+.chips li{font-size:13px;padding:4px 10px;border-radius:999px;background:var(--accent-soft);color:var(--fg)}
+section{padding:40px 0;border-top:1px solid var(--line)}
+h2{font-size:26px;margin:0 0 12px;letter-spacing:-.01em}
+h3{font-size:18px;margin:24px 0 8px}
+p{margin:0 0 14px}
+.muted{color:var(--muted)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-top:20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px}
+.card h3{margin-top:0}
+.card p{margin:0;color:var(--muted);font-size:15px}
+.tbl{overflow-x:auto;margin-top:16px}
+table{border-collapse:collapse;width:100%;font-size:15px}
+th,td{border-bottom:1px solid var(--line);padding:9px 10px;text-align:left;vertical-align:top}
+th{font-weight:600}
+td.c,th.c{text-align:center}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em;background:var(--code);padding:1px 5px;border-radius:4px}
+pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:14px;line-height:1.5}
+pre code{background:none;padding:0}
+.tools{columns:2 260px;column-gap:24px;padding-left:18px}
+.tools li{margin-bottom:4px;break-inside:avoid}
+details{border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin-bottom:10px;background:var(--card)}
+summary{cursor:pointer;font-weight:600}
+details p{margin:10px 0 0;color:var(--muted)}
+footer{border-top:1px solid var(--line);padding:28px 0 40px;color:var(--muted);font-size:14px}
+@media (max-width:600px){nav a:not(.gh){display:none}.hero{padding:40px 0 28px}}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/favicon.svg" alt="" width="26" height="26">mail-mcp</a>
+    <nav>
+      <a href="#providers">Providers</a>
+      <a href="#install">Install</a>
+      <a href="#tools">Tools</a>
+      <a href="#faq">FAQ</a>
+      <a class="gh" href="https://github.com/tecnologicachile/mail-mcp">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+<div class="wrap">
+  <div class="hero">
+    <h1>Email MCP server for AI agents</h1>
+    <p class="lead">mail-mcp is an open-source <abbr title="Model Context Protocol">MCP</abbr> server written in Rust that lets AI agents read, search, send and organize email. It speaks IMAP, SMTP, Microsoft Graph and Exchange Web Services, so it works with Gmail, Microsoft 365, Outlook.com, iCloud, Zoho, Fastmail and any standard mail server.</p>
+    <div class="btns">
+      <a class="btn primary" href="#install">Install in 2 minutes</a>
+      <a class="btn" href="https://github.com/tecnologicachile/mail-mcp">View on GitHub</a>
+    </div>
+    <ul class="chips">
+      <li>31 tools</li><li>OAuth2 (XOAUTH2)</li><li>Multi-account</li><li>Linux, macOS, Windows</li><li>MIT license</li><li>v0.4.16</li>
+    </ul>
+  </div>
+</div>
+
+<section id="what">
+  <div class="wrap">
+    <h2>What it does</h2>
+    <p>Connect mail-mcp to Claude Code, Claude Desktop, Cursor or any MCP client and the agent can work with your inbox: find a thread, summarize it, draft and send a reply with the right threading headers, file messages into folders, or clean up hundreds of messages in one call. It runs on your machine and talks directly to your mail provider, so credentials and messages never pass through a third party.</p>
+    <div class="grid">
+      <div class="card"><h3>Read and search</h3><p>Search by sender, subject, date or full text, with cursor pagination. Get parsed messages with text, sanitized HTML and attachment metadata.</p></div>
+      <div class="card"><h3>Send, reply, forward</h3><p>Plain text and HTML, CC and BCC, attachments from disk, and replies that keep the conversation threaded.</p></div>
+      <div class="card"><h3>Organize at scale</h3><p>Move, copy, flag and delete messages, manage folders, and run bulk operations on up to 500 messages at once.</p></div>
+      <div class="card"><h3>Microsoft without SMTP</h3><p>Personal Microsoft accounts block SMTP. mail-mcp sends through Microsoft Graph or EWS instead, with one OAuth2 token.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="providers">
+  <div class="wrap">
+    <h2>Supported email providers</h2>
+    <div class="tbl">
+    <table>
+      <thead><tr><th>Provider</th><th class="c">IMAP</th><th class="c">SMTP</th><th class="c">Graph API</th><th class="c">EWS</th><th class="c">OAuth2</th></tr></thead>
+      <tbody>
+        <tr><td>Microsoft 365</td><td class="c">Yes</td><td class="c">Admin-dependent</td><td class="c">Yes</td><td class="c">Yes</td><td class="c">Yes</td></tr>
+        <tr><td>Outlook.com / Hotmail</td><td class="c">Yes</td><td class="c">Blocked by Microsoft</td><td class="c">Yes</td><td class="c">Yes</td><td class="c">Yes</td></tr>
+        <tr><td>Gmail</td><td class="c">Yes</td><td class="c">Yes</td><td class="c">—</td><td class="c">—</td><td class="c">Yes</td></tr>
+        <tr><td>Apple iCloud</td><td class="c">Yes</td><td class="c">Yes</td><td class="c">—</td><td class="c">—</td><td class="c">—</td></tr>
+        <tr><td>Zoho Mail</td><td class="c">Yes</td><td class="c">Yes</td><td class="c">—</td><td class="c">—</td><td class="c">—</td></tr>
+        <tr><td>Fastmail</td><td class="c">Yes</td><td class="c">Yes</td><td class="c">—</td><td class="c">—</td><td class="c">—</td></tr>
+        <tr><td>Any IMAP/SMTP server</td><td class="c">Yes</td><td class="c">Yes</td><td class="c">—</td><td class="c">—</td><td class="c">—</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="muted" style="margin-top:14px">All accounts can be configured at once; every tool takes an <code>account_id</code>.</p>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <h2>Install</h2>
+    <h3>Linux and macOS</h3>
+<pre><code>curl --proto '=https' --tlsv1.2 -LsSf https://github.com/tecnologicachile/mail-mcp/releases/latest/download/mail-mcp-installer.sh | sh</code></pre>
+    <h3>Windows (PowerShell)</h3>
+<pre><code>powershell -ExecutionPolicy Bypass -c "irm https://github.com/tecnologicachile/mail-mcp/releases/latest/download/mail-mcp-installer.ps1 | iex"</code></pre>
+    <h3>Docker</h3>
+<pre><code>docker run --rm -i --env-file .env ghcr.io/tecnologicachile/mail-mcp</code></pre>
+    <h3>From source</h3>
+<pre><code>git clone https://github.com/tecnologicachile/mail-mcp.git
+cd mail-mcp &amp;&amp; cargo build --release</code></pre>
+    <h3>Add it to your MCP client</h3>
+    <p>Example for Gmail with an app password. The same block works in Claude Code, Claude Desktop, Cursor and other MCP clients.</p>
+<pre><code>{
+  "mcpServers": {
+    "mail": {
+      "command": "mail-mcp",
+      "env": {
+        "MAIL_IMAP_DEFAULT_HOST": "imap.gmail.com",
+        "MAIL_IMAP_DEFAULT_USER": "you@gmail.com",
+        "MAIL_IMAP_DEFAULT_PASS": "your-app-password",
+        "MAIL_SMTP_DEFAULT_HOST": "smtp.gmail.com",
+        "MAIL_SMTP_DEFAULT_PORT": "587",
+        "MAIL_SMTP_DEFAULT_USER": "you@gmail.com",
+        "MAIL_SMTP_DEFAULT_PASS": "your-app-password",
+        "MAIL_SMTP_DEFAULT_SECURE": "starttls",
+        "MAIL_IMAP_WRITE_ENABLED": "true",
+        "MAIL_SMTP_WRITE_ENABLED": "true"
+      }
+    }
+  }
+}</code></pre>
+    <p>For Microsoft 365 and Outlook.com, see the <a href="https://github.com/tecnologicachile/mail-mcp/blob/main/docs/account-setup.md">account setup guide</a> for the EWS and Graph device-code flow.</p>
+  </div>
+</section>
+
+<section id="tools">
+  <div class="wrap">
+    <h2>31 MCP tools</h2>
+    <h3>Read</h3>
+    <ul class="tools">
+      <li><code>list_all_accounts</code> accounts and their capabilities</li>
+      <li><code>imap_list_accounts</code></li>
+      <li><code>imap_verify_account</code> test connection and auth</li>
+      <li><code>imap_list_mailboxes</code> list folders</li>
+      <li><code>imap_mailbox_status</code> message counts</li>
+      <li><code>imap_search_messages</code> search with pagination</li>
+      <li><code>imap_get_message</code> parsed message</li>
+      <li><code>imap_get_message_raw</code> RFC 822 source</li>
+      <li><code>imap_get_attachment</code> save an attachment to disk</li>
+    </ul>
+    <h3>Write and organize</h3>
+    <ul class="tools">
+      <li><code>imap_update_message_flags</code></li>
+      <li><code>imap_copy_message</code> also across accounts</li>
+      <li><code>imap_move_message</code></li>
+      <li><code>imap_delete_message</code></li>
+      <li><code>imap_create_mailbox</code></li>
+      <li><code>imap_delete_mailbox</code></li>
+      <li><code>imap_rename_mailbox</code></li>
+      <li><code>imap_append_message</code></li>
+      <li><code>imap_bulk_move</code> up to 500 messages</li>
+      <li><code>imap_bulk_delete</code> up to 500 messages</li>
+      <li><code>imap_bulk_update_flags</code> up to 500 messages</li>
+      <li><code>imap_search_and_move</code></li>
+      <li><code>imap_search_and_delete</code></li>
+    </ul>
+    <h3>Send</h3>
+    <ul class="tools">
+      <li><code>smtp_send_message</code></li>
+      <li><code>smtp_reply_message</code> threaded replies</li>
+      <li><code>smtp_forward_message</code></li>
+      <li><code>smtp_verify_account</code></li>
+      <li><code>graph_send_message</code> Microsoft Graph</li>
+    </ul>
+    <h3>Exchange Web Services</h3>
+    <ul class="tools">
+      <li><code>ews_search_messages</code></li>
+      <li><code>ews_get_message</code></li>
+      <li><code>ews_send_message</code></li>
+    </ul>
+    <h3>Setup</h3>
+    <ul class="tools">
+      <li><code>get_setup_guide</code> step-by-step account configuration</li>
+    </ul>
+    <p class="muted">Full input and output contract: <a href="https://github.com/tecnologicachile/mail-mcp/blob/main/docs/tool-contract.md">docs/tool-contract.md</a>.</p>
+  </div>
+</section>
+
+<section id="security">
+  <div class="wrap">
+    <h2>Security by default</h2>
+    <div class="grid">
+      <div class="card"><h3>Read-only until you say so</h3><p>Write operations need <code>MAIL_IMAP_WRITE_ENABLED=true</code>, sending needs <code>MAIL_SMTP_WRITE_ENABLED=true</code>, and deletes require <code>confirm: true</code>.</p></div>
+      <div class="card"><h3>Secrets stay secret</h3><p>Passwords and tokens are held as secret strings, never logged and never returned by any tool.</p></div>
+      <div class="card"><h3>TLS everywhere</h3><p>All connections use TLS. Message HTML is sanitized and every output is size-bounded.</p></div>
+      <div class="card"><h3>Attachment scope</h3><p><code>MAIL_ATTACHMENT_UPLOAD_DIR</code> confines which local files a send tool may attach, so a prompt-injected agent cannot exfiltrate keys.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="faq">
+  <div class="wrap">
+    <h2>Frequently asked questions</h2>
+    <details open><summary>How do I give Claude access to my email?</summary><p>Install mail-mcp, add it as an MCP server in Claude Code, Claude Desktop or any MCP client, and configure your account with environment variables. The agent then gets tools to search, read, send, reply, forward and organize email.</p></details>
+    <details><summary>Does mail-mcp work with Outlook.com, Hotmail and Microsoft 365?</summary><p>Yes. Microsoft blocks SMTP on personal accounts, so mail-mcp sends through Microsoft Graph API or Exchange Web Services (EWS) instead. EWS is the simplest option: one OAuth2 token covers reading and sending, and it works on tenants that block Graph and IMAP.</p></details>
+    <details><summary>Can the AI agent send email, or only read it?</summary><p>Both. Reading is enabled by default. Moving, deleting and sending stay disabled until you set <code>MAIL_IMAP_WRITE_ENABLED=true</code> and <code>MAIL_SMTP_WRITE_ENABLED=true</code>, and deletes also require <code>confirm: true</code>.</p></details>
+    <details><summary>Does mail-mcp support Gmail, iCloud, Zoho and Fastmail?</summary><p>Yes. Any provider that offers IMAP and SMTP works, including Gmail (with an app password or OAuth2), Apple iCloud, Zoho, Fastmail and self-hosted mail servers.</p></details>
+    <details><summary>Does it support OAuth2?</summary><p>Yes. mail-mcp implements XOAUTH2 natively for IMAP and SMTP, plus OAuth2 for Microsoft Graph and EWS, with cached tokens that refresh automatically.</p></details>
+    <details><summary>Is there a Docker image?</summary><p>Yes: <code>ghcr.io/tecnologicachile/mail-mcp</code>. Prebuilt binaries for Linux, macOS and Windows are also available on <a href="https://github.com/tecnologicachile/mail-mcp/releases/latest">GitHub Releases</a>.</p></details>
+    <details><summary>Is mail-mcp free?</summary><p>Yes. mail-mcp is open source under the MIT license and runs on your own machine, so your credentials and mail never go through a third-party service.</p></details>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>mail-mcp is maintained by <a href="https://tecnologicachile.cl">Tecnológica Chile</a> and open to contributions. MIT license.</p>
+    <p><a href="https://github.com/tecnologicachile/mail-mcp">GitHub</a> · <a href="https://github.com/tecnologicachile/mail-mcp/releases">Releases</a> · <a href="https://github.com/tecnologicachile/mail-mcp/blob/main/docs/security.md">Security</a> · <a href="/llms.txt">llms.txt</a></p>
+  </div>
+</footer>
+</body>
+</html>

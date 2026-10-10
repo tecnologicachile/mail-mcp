@@ -1,0 +1,131 @@
+# mail-mcp: email MCP server for AI agents
+
+> mail-mcp is an open-source Model Context Protocol (MCP) server written in Rust that lets AI agents read, search, send and organize email. It speaks IMAP, SMTP, Microsoft Graph API and Exchange Web Services (EWS), so it works with Gmail, Microsoft 365, Outlook.com, iCloud, Zoho, Fastmail and any standard mail server.
+
+- Website: https://mail-mcp.tecnologicachile.cl/
+- Source: https://github.com/tecnologicachile/mail-mcp
+- Latest release: v0.4.16 (https://github.com/tecnologicachile/mail-mcp/releases/latest)
+- License: MIT
+- Maintainer: Tecnológica Chile (https://tecnologicachile.cl)
+- Platforms: Linux (x86_64), macOS (Intel and Apple Silicon), Windows (x86_64), Docker
+
+## What it does
+
+Connect mail-mcp to Claude Code, Claude Desktop, Cursor or any MCP client and the agent can work with an inbox: find a thread, summarize it, draft and send a reply with correct threading headers, file messages into folders, or clean up hundreds of messages in one call. It runs on the user's machine and talks directly to the mail provider, so credentials and messages never pass through a third party.
+
+- Read and search: search by sender, subject, date or full text with cursor pagination; parsed messages with text, sanitized HTML and attachment metadata.
+- Send, reply, forward: plain text and HTML, CC and BCC, attachments from disk, threaded replies.
+- Organize at scale: move, copy, flag and delete; manage folders; bulk operations on up to 500 messages.
+- Microsoft without SMTP: personal Microsoft accounts block SMTP, so mail-mcp sends through Microsoft Graph or EWS with one OAuth2 token.
+
+## Supported providers
+
+| Provider | IMAP | SMTP | Graph API | EWS | OAuth2 |
+|---|---|---|---|---|---|
+| Microsoft 365 | Yes | Admin-dependent | Yes | Yes | Yes |
+| Outlook.com / Hotmail | Yes | Blocked by Microsoft | Yes | Yes | Yes |
+| Gmail | Yes | Yes | — | — | Yes |
+| Apple iCloud | Yes | Yes | — | — | — |
+| Zoho Mail | Yes | Yes | — | — | — |
+| Fastmail | Yes | Yes | — | — | — |
+| Any IMAP/SMTP server | Yes | Yes | — | — | — |
+
+Multiple accounts can be configured at once; every tool takes an `account_id`.
+
+## Install
+
+Linux and macOS:
+
+```
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/tecnologicachile/mail-mcp/releases/latest/download/mail-mcp-installer.sh | sh
+```
+
+Windows (PowerShell):
+
+```
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/tecnologicachile/mail-mcp/releases/latest/download/mail-mcp-installer.ps1 | iex"
+```
+
+Docker:
+
+```
+docker run --rm -i --env-file .env ghcr.io/tecnologicachile/mail-mcp
+```
+
+From source:
+
+```
+git clone https://github.com/tecnologicachile/mail-mcp.git
+cd mail-mcp && cargo build --release
+```
+
+MCP client configuration (Gmail with an app password; works in Claude Code, Claude Desktop, Cursor and other MCP clients):
+
+```json
+{
+  "mcpServers": {
+    "mail": {
+      "command": "mail-mcp",
+      "env": {
+        "MAIL_IMAP_DEFAULT_HOST": "imap.gmail.com",
+        "MAIL_IMAP_DEFAULT_USER": "you@gmail.com",
+        "MAIL_IMAP_DEFAULT_PASS": "your-app-password",
+        "MAIL_SMTP_DEFAULT_HOST": "smtp.gmail.com",
+        "MAIL_SMTP_DEFAULT_PORT": "587",
+        "MAIL_SMTP_DEFAULT_USER": "you@gmail.com",
+        "MAIL_SMTP_DEFAULT_PASS": "your-app-password",
+        "MAIL_SMTP_DEFAULT_SECURE": "starttls",
+        "MAIL_IMAP_WRITE_ENABLED": "true",
+        "MAIL_SMTP_WRITE_ENABLED": "true"
+      }
+    }
+  }
+}
+```
+
+For Microsoft 365 and Outlook.com, follow the account setup guide (EWS or Graph device code flow): https://github.com/tecnologicachile/mail-mcp/blob/main/docs/account-setup.md
+
+## The 31 MCP tools
+
+Read: `list_all_accounts`, `imap_list_accounts`, `imap_verify_account`, `imap_list_mailboxes`, `imap_mailbox_status`, `imap_search_messages`, `imap_get_message`, `imap_get_message_raw`, `imap_get_attachment`.
+
+Write and organize: `imap_update_message_flags`, `imap_copy_message` (also across accounts), `imap_move_message`, `imap_delete_message`, `imap_create_mailbox`, `imap_delete_mailbox`, `imap_rename_mailbox`, `imap_append_message`, `imap_bulk_move`, `imap_bulk_delete`, `imap_bulk_update_flags`, `imap_search_and_move`, `imap_search_and_delete`.
+
+Send: `smtp_send_message`, `smtp_reply_message`, `smtp_forward_message`, `smtp_verify_account`, `graph_send_message`.
+
+Exchange Web Services: `ews_search_messages`, `ews_get_message`, `ews_send_message`.
+
+Setup: `get_setup_guide`.
+
+Full contract: https://github.com/tecnologicachile/mail-mcp/blob/main/docs/tool-contract.md
+
+## Security
+
+- Write operations require `MAIL_IMAP_WRITE_ENABLED=true`; sending requires `MAIL_SMTP_WRITE_ENABLED=true`; deletes require `confirm: true`.
+- Passwords and tokens are held as secret strings, never logged and never returned by any tool.
+- All connections use TLS; message HTML is sanitized; every output is size-bounded.
+- `MAIL_ATTACHMENT_UPLOAD_DIR` confines which local files a send tool may attach.
+- Transport is stdio by default; an optional streamable HTTP transport (`MAIL_MCP_TRANSPORT=http`) binds to loopback and has no built-in authentication, so it belongs behind an authenticating gateway.
+
+## FAQ
+
+**How do I give Claude access to my email?**
+Install mail-mcp, add it as an MCP server in Claude Code, Claude Desktop or any MCP client, and configure your account with environment variables. The agent then gets tools to search, read, send, reply, forward and organize email.
+
+**Does mail-mcp work with Outlook.com, Hotmail and Microsoft 365?**
+Yes. Microsoft blocks SMTP on personal accounts, so mail-mcp sends through Microsoft Graph API or Exchange Web Services (EWS) instead. EWS is the simplest option: one OAuth2 token covers reading and sending, and it works on tenants that block Graph and IMAP.
+
+**Can the AI agent send email, or only read it?**
+Both. Reading is enabled by default. Moving, deleting and sending stay disabled until you set `MAIL_IMAP_WRITE_ENABLED=true` and `MAIL_SMTP_WRITE_ENABLED=true`, and deletes also require `confirm: true`.
+
+**Does mail-mcp support Gmail, iCloud, Zoho and Fastmail?**
+Yes. Any provider that offers IMAP and SMTP works, including Gmail (with an app password or OAuth2), Apple iCloud, Zoho, Fastmail and self-hosted mail servers.
+
+**Does it support OAuth2?**
+Yes. mail-mcp implements XOAUTH2 natively for IMAP and SMTP, plus OAuth2 for Microsoft Graph and EWS, with cached tokens that refresh automatically.
+
+**Is there a Docker image?**
+Yes: `ghcr.io/tecnologicachile/mail-mcp`. Prebuilt binaries for Linux, macOS and Windows are also on GitHub Releases.
+
+**Is mail-mcp free?**
+Yes. It is open source under the MIT license and runs on your own machine.
