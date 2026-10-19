@@ -33,6 +33,42 @@ Passwords are handled with strict secrecy guarantees:
 - Passwords are never included in log output
 - Passwords are never returned in tool responses
 
+### Configuration File Security
+
+The TOML file stores passwords, client secrets, and refresh tokens in plaintext,
+not an encrypted vault. The default location is `~/.mail-mcp/config.toml`.
+Keep it out of version control, shared directories, and unprotected backups.
+The same precautions apply to files selected by `--config` or `MAIL_CONFIG_FILE`.
+
+- CLI secret entry uses hidden terminal prompts; secrets are not accepted as
+  command-line arguments or piped answers. A blank secret during editing keeps
+  the stored value.
+- On Unix, CLI saves set the file mode to `0600`. Newly created configuration
+  directories use `0700`; existing directory permissions are not changed.
+  Unix modes do not configure Windows ACLs, so restrict access separately there.
+- Saves preserve comments on retained settings and unrelated account sections.
+  `config init` refuses to overwrite an existing file. Cancelling a prompt
+  writes nothing; a conflicting edit is rejected instead of silently replacing
+  another change. A save that would exceed the 1 MiB limit is refused and the
+  file is left unchanged.
+- Saves through a symlinked configuration path write to the link's target. The
+  save lock (`.<file name>.lock` beside the target) must not be a symlink; a
+  symlinked lock path is refused rather than followed.
+- Account listings and validation report environment override names, not values.
+  TOML parse errors omit source lines that could contain secrets.
+- `accounts remove` deletes only a file account. Environment credentials are
+  unaffected and can keep the account available.
+- `config validate` is offline. `accounts test` authenticates and performs
+  read-only checks without sending or changing mail; OAuth token refresh and
+  provider-side access logging can still occur.
+
+Process environment variables override file values, including write gates.
+Review an MCP client's `env` entries when moving accounts to TOML. Implicit
+`.env` discovery is disabled when a TOML file is selected; it is not merged
+silently into file-backed configuration. See
+[configuration precedence](advanced-configuration.md#configuration-sources-and-precedence)
+and [guided account management](account-setup.md#guided-setup-with-toml).
+
 ### Environment Variables
 
 ```bash
@@ -235,4 +271,4 @@ All tool responses include metadata for auditing:
 1. **No STARTTLS support**: Only implicit TLS (IMAPS) is supported
 2. **No certificate pinning**: Certificates are validated per standard PKI; custom CA chains are not supported
 3. **No client authentication**: Client certificates are not supported
-4. **No encryption at rest**: Credentials are in memory only; disk encryption is the user's responsibility
+4. **No encryption at rest**: TOML and `.env` credentials are plaintext on disk; file access controls, backup protection, and disk encryption are the operator's responsibility

@@ -35,11 +35,11 @@ pub enum Transport {
 }
 
 impl Transport {
-    /// Read `MAIL_MCP_TRANSPORT` (`stdio`, the default, or `http`).
-    pub fn from_env() -> Result<Self, String> {
-        match std::env::var("MAIL_MCP_TRANSPORT") {
-            Err(_) => Ok(Self::Stdio),
-            Ok(v) => parse_transport(&v),
+    /// Read `MAIL_MCP_TRANSPORT` from the settings map (`stdio`, the default, or `http`).
+    pub fn from_settings(settings: &crate::config_file::Settings) -> Result<Self, String> {
+        match nonempty(settings, "MAIL_MCP_TRANSPORT") {
+            None => Ok(Self::Stdio),
+            Some(value) => parse_transport(value),
         }
     }
 }
@@ -48,9 +48,7 @@ fn parse_transport(raw: &str) -> Result<Transport, String> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "" | "stdio" => Ok(Transport::Stdio),
         "http" | "streamable-http" => Ok(Transport::Http),
-        other => Err(format!(
-            "MAIL_MCP_TRANSPORT '{other}' is not supported (use 'stdio' or 'http')"
-        )),
+        _ => Err("MAIL_MCP_TRANSPORT is not supported (use 'stdio' or 'http')".to_owned()),
     }
 }
 
@@ -63,15 +61,22 @@ pub struct HttpSettings {
 
 impl HttpSettings {
     /// Read `MAIL_MCP_HTTP_HOST` (default `127.0.0.1`), `MAIL_MCP_HTTP_PORT`
-    /// (default `8000`) and `MAIL_MCP_HTTP_PATH` (default `/mcp`).
-    pub fn from_env() -> Result<Self, String> {
-        let get = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    /// (default `8000`) and `MAIL_MCP_HTTP_PATH` (default `/mcp`) from the
+    /// settings map.
+    pub fn from_settings(settings: &crate::config_file::Settings) -> Result<Self, String> {
         parse_settings(
-            get("MAIL_MCP_HTTP_HOST").as_deref(),
-            get("MAIL_MCP_HTTP_PORT").as_deref(),
-            get("MAIL_MCP_HTTP_PATH").as_deref(),
+            nonempty(settings, "MAIL_MCP_HTTP_HOST"),
+            nonempty(settings, "MAIL_MCP_HTTP_PORT"),
+            nonempty(settings, "MAIL_MCP_HTTP_PATH"),
         )
     }
+}
+
+fn nonempty<'a>(settings: &'a crate::config_file::Settings, key: &str) -> Option<&'a str> {
+    settings
+        .get(key)
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn parse_settings(
@@ -85,7 +90,7 @@ fn parse_settings(
         Some(p) => p
             .trim()
             .parse::<u16>()
-            .map_err(|_| format!("MAIL_MCP_HTTP_PORT '{p}' is not a valid port"))?,
+            .map_err(|_| "MAIL_MCP_HTTP_PORT is not a valid port".to_owned())?,
     };
     // Bracket bare IPv6 literals so "::" and "::1" parse as socket addresses.
     let joined = if host.contains(':') && !host.starts_with('[') {
@@ -95,10 +100,10 @@ fn parse_settings(
     };
     let addr = joined
         .parse::<SocketAddr>()
-        .map_err(|_| format!("MAIL_MCP_HTTP_HOST '{host}' must be an IP address"))?;
+        .map_err(|_| "MAIL_MCP_HTTP_HOST must be an IP address".to_owned())?;
     let path = path.unwrap_or(DEFAULT_PATH).trim();
     if !path.starts_with('/') {
-        return Err(format!("MAIL_MCP_HTTP_PATH '{path}' must start with '/'"));
+        return Err("MAIL_MCP_HTTP_PATH must start with '/'".to_owned());
     }
     Ok(HttpSettings {
         addr,
@@ -190,5 +195,29 @@ mod tests {
         assert!(parse_settings(None, Some("http"), None).is_err());
         assert!(parse_settings(Some("mail.example.com"), None, None).is_err());
         assert!(parse_settings(None, None, Some("mcp")).is_err());
+    }
+
+    #[test]
+    fn from_settings_reads_transport_and_http_keys() {
+        let mut settings = crate::config_file::Settings::new();
+        assert_eq!(
+            Transport::from_settings(&settings).unwrap(),
+            Transport::Stdio
+        );
+        settings.insert("MAIL_MCP_TRANSPORT".to_owned(), "http".to_owned());
+        settings.insert("MAIL_MCP_HTTP_HOST".to_owned(), "::1".to_owned());
+        settings.insert("MAIL_MCP_HTTP_PORT".to_owned(), "9000".to_owned());
+        settings.insert("MAIL_MCP_HTTP_PATH".to_owned(), "/mail".to_owned());
+        assert_eq!(
+            Transport::from_settings(&settings).unwrap(),
+            Transport::Http
+        );
+        let http = HttpSettings::from_settings(&settings).unwrap();
+        assert_eq!(http.addr, "[::1]:9000".parse().unwrap());
+        assert_eq!(http.path, "/mail");
+        let secret = "super-secret-token-value";
+        settings.insert("MAIL_MCP_HTTP_PORT".to_owned(), secret.to_owned());
+        let error = HttpSettings::from_settings(&settings).unwrap_err();
+        assert!(!error.contains(secret));
     }
 }

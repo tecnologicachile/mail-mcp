@@ -1,6 +1,139 @@
 # Account Setup Guide
 
-This guide walks you through configuring email accounts for mail-mcp.
+This guide covers guided TOML configuration and environment-only account setup.
+
+## Guided Setup with TOML
+
+Install `mail-mcp` using the [manual setup instructions](../README.md#manual-setup).
+For a source build, substitute the path to `target/release/mail-mcp` in the
+commands below.
+
+Before adding an account, obtain its password or app password. OAuth2, Microsoft
+Graph, and EWS accounts need an existing client ID and refresh token with the
+appropriate provider permissions. The CLI stores these credentials; it does not
+run a browser login, device code flow, or initial token acquisition. A public
+OAuth client uses `none` as its client secret.
+
+1. Create a commented configuration file:
+
+   ```bash
+   mail-mcp config init
+   ```
+
+   This creates `~/.mail-mcp/config.toml` with an empty account table. It refuses
+   to overwrite an existing file. An empty file is not a working server
+   configuration; add an account before validating or starting the server.
+
+2. Add an account in a terminal:
+
+   ```bash
+   mail-mcp accounts add
+   ```
+
+   Choose IMAP and SMTP with a password, IMAP and SMTP with OAuth2, Microsoft
+   Graph, or Exchange Web Services (EWS). Enter an account ID such as `default`
+   and the requested connection details. Password-based presets cover Gmail,
+   iCloud, and Microsoft 365; choose `Other` for custom hosts. Passwords, client
+   secrets, and refresh tokens use hidden prompts, not arguments or pipes.
+   Review the non-secret summary and confirm before saving. Adding an existing
+   file account is refused; use `accounts edit` instead. `accounts add` can
+   also create the file when `config init` was skipped.
+
+3. Inspect and validate the effective configuration:
+
+   ```bash
+   mail-mcp accounts list
+   mail-mcp config validate
+   ```
+
+   The list shows account IDs, protocols, configuration sources, and environment
+   override names, never credentials. Validation checks local configuration and
+   transport settings without contacting a mail server. Success prints `ok`;
+   it does not prove authentication or provider permissions.
+
+4. Check the account connection, replacing `default` with the ID chosen above:
+
+   ```bash
+   mail-mcp accounts test default
+   ```
+
+   The command checks each configured protocol and reports its result. It
+   authenticates and runs IMAP `NOOP`, SMTP connection verification without
+   sending a message, a Graph draft listing limited to one item, or an EWS inbox
+   listing limited to one item. These are read-only checks using protocol
+   timeouts; no mail is sent, deleted, marked read, or otherwise changed.
+   OAuth access-token refresh can occur, so an existing refresh token and
+   permissions for the read operation are required. Any failed check makes the
+   command fail.
+
+5. Register the server in the MCP client:
+
+   ```json
+   {
+     "mcpServers": {
+       "mail": {
+         "command": "mail-mcp"
+       }
+     }
+   }
+   ```
+
+   Use an absolute binary path if the client cannot find `mail-mcp` on `PATH`.
+   With no subcommand, the process starts the MCP server without prompts.
+   Stdio is the default, with protocol-only stdout. Write, send, and draft
+   operations stay disabled unless explicitly enabled in `[settings]` or the
+   environment.
+
+See the [TOML configuration reference](advanced-configuration.md#toml-configuration)
+for every supported field, examples, account ID rules, and path precedence.
+`--config PATH` overrides `MAIL_CONFIG_FILE`, which overrides the default path.
+An existing or explicitly selected TOML file disables implicit `.env` discovery.
+Process `MAIL_*` settings still override the file; existing MCP-client `env`
+entries must be removed if the file should supply those values.
+
+### Editing and Removing File Accounts
+
+```bash
+mail-mcp accounts edit default
+```
+
+Editing prompts for the account's existing protocol sections. A blank secret
+keeps the stored value, including when the repeat-entry prompt is left blank.
+Cancelling before save leaves the file unchanged. Edits preserve comments on
+retained settings and unrelated accounts. When the configuration path is a
+symlink, for example one managed by a dotfiles tool, saves write to the file it
+points to and keep the link in place.
+
+Removal affects only the account in the selected TOML file, not the provider's
+mailbox or its messages:
+
+```bash
+mail-mcp accounts remove default
+```
+
+Confirmation defaults to no. `mail-mcp accounts remove default --yes` skips the
+prompt and works without a terminal. Environment variables are not removed: the
+command lists the names of any that still reference the account, and a fully
+configured environment account remains available. Comments above the removed
+account that are separated from it by a blank line stay in the file. An
+environment-only account cannot be edited or removed through these file
+commands.
+
+Restart a running MCP server after configuration changes so it loads the updated
+file and environment.
+
+The CLI writes plaintext credentials to the configuration file. On Unix, saved
+files have mode `0600` and newly created configuration directories have mode
+`0700`; existing directory permissions are unchanged. Keep the file out of
+version control and shared locations. See [configuration file security](security.md#configuration-file-security).
+
+## Environment-Only Setup
+
+The provider examples below remain usable without TOML: pass their `MAIL_*`
+variables through the process environment or the MCP client's `env` object.
+Legacy implicit `.env` loading applies only when no TOML path was explicitly
+selected and no default TOML file exists. Creating the TOML file does not import
+`.env` accounts.
 
 ## Quick Reference: Environment Variables
 
@@ -29,8 +162,8 @@ Global settings:
 |----------|---------|-------------|
 | `MAIL_IMAP_WRITE_ENABLED` | false | Enable IMAP write operations |
 | `MAIL_SMTP_WRITE_ENABLED` | false | Enable SMTP send operations |
-| `MAIL_SMTP_SAVE_SENT` | true | Save sent emails to IMAP Sent folder |
-| `MAIL_SMTP_TIMEOUT_MS` | 30000 | SMTP operation timeout |
+| `MAIL_SMTP_SAVE_SENT` | unset | Global override; per-account choice wins, otherwise Gmail/Zoho skip the IMAP copy and other hosts save it |
+| `MAIL_SMTP_TIMEOUT_MS` | unset | Legacy send-timeout override; prefer `MAIL_SMTP_SEND_TIMEOUT_MS` (default `300000`). See [precedence](advanced-configuration.md#supported-fields) |
 
 ---
 
