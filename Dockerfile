@@ -1,5 +1,5 @@
 # Build Stage 1: Planner
-# NOTE: the codebase uses edition-2024 let-chains, which require Rust >= 1.88.
+# NOTE: the codebase uses edition-2024 let-chains and std File::try_lock, which require Rust >= 1.89.
 FROM lukemathwalker/cargo-chef:latest-rust-1.90-alpine AS chef
 # Install build dependencies
 RUN apk add --no-cache musl-dev

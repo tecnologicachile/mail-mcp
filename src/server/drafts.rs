@@ -1656,7 +1656,9 @@ mod tests {
         let account_id = std::env::var("LIVE_DRAFTS_ACCOUNT").expect("LIVE_DRAFTS_ACCOUNT");
         let to = std::env::var("LIVE_DRAFTS_TO").expect("LIVE_DRAFTS_TO");
         let send = std::env::var("LIVE_DRAFTS_SEND").is_ok_and(|v| v == "1");
-        let mut config = ServerConfig::load_from_env().expect("config from env");
+        let file = crate::config_file::ConfigFile::load(None, false).expect("config file");
+        let resolved = file.effective(true).expect("resolved config");
+        let mut config = ServerConfig::load(&resolved.values).expect("config from env");
         config.drafts_enabled = true;
         let server = MailImapServer::new(config, None);
         let tag = uuid::Uuid::new_v4().simple().to_string();

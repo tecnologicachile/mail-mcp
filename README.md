@@ -15,6 +15,13 @@
 
 Most email MCP servers only do IMAP reads. This one does **everything**: read, search, send, reply, forward, bulk operations, Microsoft Graph API, and Exchange Web Services — with real OAuth2, multi-account, and multi-provider support. Written in Rust for speed and safety.
 
+## What's New
+
+- **Guided account configuration:** `mail-mcp config init` and `mail-mcp accounts add`
+  store accounts in `~/.mail-mcp/config.toml`, outside the MCP client's JSON.
+  List, edit, remove, and run read-only connection tests from the CLI.
+  [Start with guided setup](docs/account-setup.md#guided-setup-with-toml).
+
 ## What's New in v0.5.0
 
 - **New: draft tools** (`draft_create`, `draft_update`, `draft_send`,
@@ -460,7 +467,7 @@ My email accounts to configure:
 
 Replace the last line with your email(s). Claude Code will guide you through each step including the OAuth2 device code flow for Microsoft accounts.
 
-## Manual Setup (2 minutes)
+## Manual Setup
 
 Install a prebuilt binary:
 
@@ -485,7 +492,50 @@ cd mail-mcp
 cargo build --release
 ```
 
-Add to your MCP client config (Claude Code, Cursor, etc.). With a prebuilt
+Create the default TOML file and add an account in a terminal. For a source
+build, replace `mail-mcp` with `./target/release/mail-mcp`:
+
+```bash
+mail-mcp config init
+mail-mcp accounts add
+mail-mcp accounts list
+mail-mcp config validate
+mail-mcp accounts test default
+```
+
+Choose `default` as the account ID above, or substitute the chosen ID in the
+test command. Passwords and tokens use hidden prompts. OAuth accounts require
+credentials obtained beforehand; the CLI does not perform initial login or
+token acquisition. `config init` refuses to overwrite a file, and connection
+tests do not send or change mail.
+
+Add this entry to the MCP client configuration (Claude Code, Cursor, etc.):
+
+```json
+{
+  "mcpServers": {
+    "mail": {
+      "command": "mail-mcp"
+    }
+  }
+}
+```
+
+Use an absolute binary path if necessary. The server loads
+`~/.mail-mcp/config.toml`; no credentials are needed in the client JSON.
+Writes, sends, and drafts remain disabled until enabled in the configuration.
+
+`--config PATH` takes precedence over `MAIL_CONFIG_FILE`, then the default path.
+Process `MAIL_*` settings override file fields. Implicit `.env` loading applies
+only when no TOML path is explicitly selected and no default TOML file exists.
+See [guided setup and account management](docs/account-setup.md#guided-setup-with-toml)
+and the [TOML reference](docs/advanced-configuration.md#toml-configuration) for
+edit/remove commands, all fields, and an MCP-client `MAIL_CONFIG_FILE` example.
+
+### Environment-Only Configuration
+
+Environment-only setup remains supported. Instead of creating a TOML file,
+place account settings in the MCP client's `env` object. With a prebuilt
 binary, use `"command": "mail-mcp"`:
 
 ```json
@@ -510,7 +560,11 @@ binary, use `"command": "mail-mcp"`:
 }
 ```
 
-That's it. Your AI agent can now read, search, send, reply, and manage emails.
+This environment example explicitly enables read, write, and send operations.
+
+A default `~/.mail-mcp/config.toml` applies to every client that does not
+select a file, including this one. Add `"MAIL_CONFIG_FILE": "none"` to the
+`env` object to keep the client environment-only.
 
 ### Microsoft Account? Use Graph API
 
@@ -698,6 +752,9 @@ Use `account_id` in tool calls: `"account_id": "gmail"`, `"account_id": "icloud"
 
 ## Configuration Reference
 
+For TOML fields, account examples, path selection, and environment overrides,
+see the [TOML configuration reference](docs/advanced-configuration.md#toml-configuration).
+
 <details>
 <summary>Full environment variable reference</summary>
 
@@ -758,10 +815,10 @@ Use `account_id` in tool calls: `"account_id": "gmail"`, `"account_id": "icloud"
 | `MAIL_IMAP_WRITE_ENABLED` | false | Enable IMAP write operations |
 | `MAIL_SMTP_WRITE_ENABLED` | false | Enable SMTP/Graph send operations |
 | `MAIL_DRAFTS_ENABLED` | false | Enable the draft tools (`draft_send` also needs `MAIL_SMTP_WRITE_ENABLED`) |
-| `MAIL_SMTP_SAVE_SENT` | false | Save sent emails to IMAP Sent folder (enable if your provider doesn't auto-save on send — e.g. Gmail does, Zoho doesn't always) |
+| `MAIL_SMTP_SAVE_SENT` | unset | Global Sent-copy override; per-account choice wins, otherwise Gmail/Zoho skip the IMAP copy and other hosts save it |
 | `MAIL_SMTP_CONNECT_TIMEOUT_MS` | 30000 | SMTP TCP/TLS/auth timeout (connect phase) |
 | `MAIL_SMTP_SEND_TIMEOUT_MS` | 300000 | SMTP DATA transmission timeout (5 min — accommodates large attachments) |
-| `MAIL_SMTP_TIMEOUT_MS` | _(deprecated)_ | Legacy single timeout. Honored as fallback for `MAIL_SMTP_SEND_TIMEOUT_MS`. Prefer the split vars above. |
+| `MAIL_SMTP_TIMEOUT_MS` | _(deprecated)_ | Legacy send timeout; process value overrides TOML unless `MAIL_SMTP_SEND_TIMEOUT_MS` is also set in the environment. Prefer the split vars above. |
 | `MAIL_IMAP_CONNECT_TIMEOUT_MS` | 30000 | TCP connection timeout |
 | `MAIL_IMAP_GREETING_TIMEOUT_MS` | 15000 | TLS/greeting timeout |
 | `MAIL_IMAP_SOCKET_TIMEOUT_MS` | 300000 | Socket I/O timeout |
@@ -822,12 +879,12 @@ Use `account_id` in tool calls: `"account_id": "gmail"`, `"account_id": "icloud"
 
 | Guide | Description |
 |-------|-------------|
-| [Account Setup](docs/account-setup.md) | Step-by-step per provider, OAuth2, App Passwords, Azure Client ID |
+| [Account Setup](docs/account-setup.md) | Guided CLI setup, account management, provider credentials, and environment-only setup |
 | [Tool Contract](docs/tool-contract.md) | Complete tool definitions and schemas |
 | [Message ID Format](docs/message-id-format.md) | Stable message identifier format |
 | [Cursor Pagination](docs/cursor-pagination.md) | Pagination behavior and expiration |
 | [Security](docs/security.md) | Security features and best practices |
-| [Advanced Configuration](docs/advanced-configuration.md) | Timeouts and performance tuning |
+| [Advanced Configuration](docs/advanced-configuration.md) | TOML field reference, configuration precedence, timeouts, and performance tuning |
 
 ## Development
 

@@ -143,8 +143,10 @@ The repository publishes GitHub Release archives/installers via cargo-dist.
 
 ## Architecture and File Ownership
 
-- `src/main.rs`: process bootstrap, env loading, tracing init, stdio serving.
-- `src/config.rs`: env-driven account/server config parsing.
+- `src/main.rs`: CLI dispatch, tracing init, stdio/HTTP serving.
+- `src/config.rs`: account/server config parsing from effective settings.
+- `src/config_file.rs`: TOML schema, path selection, environment merge, and safe saves.
+- `src/cli.rs` / `src/cli_accounts.rs`: config/account commands and terminal prompts.
 - `src/errors.rs`: app-level error model and MCP error mapping.
 - `src/imap.rs`: IMAP transport/session operations with timeout wrappers.
 - `src/server.rs`: MCP tool handlers, validation, business orchestration.
@@ -235,6 +237,16 @@ The repository publishes GitHub Release archives/installers via cargo-dist.
 - Do not silently alter public tool contracts.
 - Update docs when behavior or bounds change.
 - If adding env vars, document them in `docs/tool-contract.md` and this file.
+- `MAIL_CONFIG_FILE`: optional TOML path. `--config PATH` wins over it; otherwise
+  use `~/.mail-mcp/config.toml` (`HOME`, with `USERPROFILE` fallback). The value
+  `none` opts out of every config file (environment and legacy `.env` only).
+  Process `MAIL_*` settings override TOML. Transport (`MAIL_MCP_TRANSPORT`,
+  `MAIL_MCP_HTTP_*`) is environment-only, never a TOML field. Implicit `.env`
+  discovery applies only without an explicit path or an existing default TOML
+  file. Runtime may remain environment-only without a home directory;
+  config/account commands require a home directory or explicit path. Keep
+  schema/precedence docs in `docs/advanced-configuration.md` aligned with
+  `src/config_file.rs`.
 - `MAIL_SMTP_<ID>_FROM_EMAIL`: optional sender address override. When the
   SMTP auth username (`_USER`) differs from the desired From address (e.g.
   shared/group mailboxes where auth uses a personal account but the From

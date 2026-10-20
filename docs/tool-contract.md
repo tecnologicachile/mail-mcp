@@ -5,8 +5,8 @@ It is the source of truth for tool names, input/output shapes, validation bounds
 
 ## Design Decisions
 
-- Transport: stdio only.
-- Auth/config: environment variables only.
+- Transport: stdio by default; opt-in streamable HTTP has no built-in authentication. See [remote HTTP transport](advanced-configuration.md#remote-http-transport).
+- Auth/config: TOML configuration with process environment overrides; environment-only setup remains supported. See the [configuration reference](advanced-configuration.md#toml-configuration).
 - Message locator: stable `message_id` format `imap:{account_id}:{mailbox}:{uidvalidity}:{uid}`.
 - Destructive/write operations: disabled by default and explicitly gated.
 - Output style: concise summaries with bounded structured data.
@@ -421,13 +421,37 @@ Output `data`: `status`, `issues`, `account_id`, `backend`, `draft_id`, `message
 
 ## Environment Variables
 
+These names also identify the environment equivalents of
+[TOML fields](advanced-configuration.md#supported-fields). Recognized process
+variables override matching file fields. An empty or whitespace-only value
+counts as unset.
+
+Configuration file selection:
+
+- `MAIL_CONFIG_FILE`: optional TOML path, overridden by `--config PATH`; defaults
+  to `~/.mail-mcp/config.toml` (`HOME`, or `USERPROFILE` as fallback). The
+  value `none` selects no file: the server uses only the process environment
+  and the legacy `.env` fallback, and config/account commands need `--config`.
+- An explicitly selected missing file is a startup error. Malformed or
+  unreadable files fail rather than falling back.
+- Implicit `.env` discovery runs only without an explicit TOML path or an
+  existing default file; process variables take precedence. Only recognized
+  `MAIL_*` settings are read from it; the first occurrence of a variable wins.
+- With no home directory and no explicit path, runtime environment-only setup
+  still works. Configuration/account management commands need a home directory
+  or an explicit path.
+
+`config init`, `config validate`, and `accounts add|edit|list|remove|test` are
+local CLI commands, not MCP tools. With no subcommand, the server starts without
+prompts; stdio stdout is reserved for MCP protocol output.
+
 Per account:
 
 - `MAIL_IMAP_<ACCOUNT>_HOST` (required)
 - `MAIL_IMAP_<ACCOUNT>_PORT` (default `993`)
 - `MAIL_IMAP_<ACCOUNT>_SECURE` (default `true`)
 - `MAIL_IMAP_<ACCOUNT>_USER` (required)
-- `MAIL_IMAP_<ACCOUNT>_PASS` (required)
+- `MAIL_IMAP_<ACCOUNT>_PASS` (required unless matching generic OAuth2 credentials are configured)
 
 Server-wide:
 

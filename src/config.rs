@@ -1,17 +1,15 @@
 //! Configuration module for IMAP accounts and server settings
 //!
-//! All configuration is loaded from environment variables following the pattern
-//! `MAIL_IMAP_<SEGMENT>_<KEY>`. Account segments are discovered by scanning for
-//! `MAIL_IMAP_*_HOST` variables.
+//! Configuration is a `MAIL_*` map ([`crate::config_file::Settings`]). Account
+//! segments are discovered by scanning for `MAIL_IMAP_*_HOST` keys. The map may
+//! come from TOML, the process environment, or both.
 
 use std::collections::{BTreeMap, HashMap};
-use std::env;
-use std::env::VarError;
 use std::path::PathBuf;
 
-use regex::Regex;
 use secrecy::SecretString;
 
+use crate::config_file::{Settings, segments_with_suffix};
 use crate::errors::{AppError, AppResult};
 use crate::oauth2::{OAuth2AccountConfig, OAuth2Provider};
 use crate::smtp::{SmtpAccountConfig, SmtpSecurity};
@@ -124,19 +122,19 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    /// Load all configuration from environment variables
+    /// Load server configuration from an effective `MAIL_*` settings map.
     ///
-    /// Discovers accounts by scanning for `MAIL_IMAP_*_HOST` patterns.
-    /// If no accounts are explicitly defined, a `default` account is required
-    /// via `MAIL_IMAP_DEFAULT_HOST`, `MAIL_IMAP_DEFAULT_USER`, and
-    /// `MAIL_IMAP_DEFAULT_PASS`.
+    /// Discovers accounts from `MAIL_IMAP_*_HOST` keys. When the map has no
+    /// IMAP, SMTP, Graph, or EWS account, a `default` IMAP account is required
+    /// (`MAIL_IMAP_DEFAULT_HOST`, `MAIL_IMAP_DEFAULT_USER`, and
+    /// `MAIL_IMAP_DEFAULT_PASS`). SMTP-only, Graph-only, and EWS-only maps load
+    /// with an empty IMAP account list.
     ///
     /// # Errors
     ///
-    /// Returns `InvalidInput` if required environment variables are missing
-    /// or malformed.
+    /// Returns `InvalidInput` if required settings are missing or malformed.
     ///
-    /// # Example Environment
+    /// # Example keys
     ///
     /// ```text
     /// MAIL_IMAP_DEFAULT_HOST=imap.gmail.com
@@ -147,37 +145,26 @@ impl ServerConfig {
     /// MAIL_IMAP_WORK_PASS=work-pass
     /// MAIL_IMAP_WRITE_ENABLED=false
     /// ```
-    pub fn load_from_env() -> AppResult<Self> {
+    pub fn load(settings: &Settings) -> AppResult<Self> {
         // Discover OAuth2 accounts first (needed to determine auth method)
-        let oauth2_accounts = load_oauth2_accounts()?;
+        let oauth2_accounts = load_oauth2_accounts(settings)?;
+        let graph_oauth2_accounts = load_graph_oauth2_accounts(settings)?;
+        let (ews_accounts, ews_oauth2_accounts) = load_ews_accounts(settings)?;
+        let smtp_accounts = load_smtp_accounts(settings, &oauth2_accounts)?;
 
-        let account_pattern = Regex::new(r"^MAIL_IMAP_([A-Z0-9_]+)_HOST$")
-            .map_err(|e| AppError::Internal(format!("invalid account regex: {e}")))?;
-
-        let mut account_segments: Vec<String> = env::vars()
-            .filter_map(|(k, _)| {
-                account_pattern
-                    .captures(&k)
-                    .and_then(|c| c.get(1).map(|m| m.as_str().to_owned()))
-            })
-            .collect();
-
-        if account_segments.is_empty() {
+        let mut account_segments = segments_with_suffix(settings, "MAIL_IMAP_", "HOST");
+        let other_accounts = !smtp_accounts.is_empty()
+            || !graph_oauth2_accounts.is_empty()
+            || !ews_accounts.is_empty();
+        if account_segments.is_empty() && !other_accounts {
             account_segments.push("DEFAULT".to_owned());
         }
 
-        account_segments.sort();
-        account_segments.dedup();
-
         let mut accounts = BTreeMap::new();
         for seg in &account_segments {
-            let account = load_account(seg, &oauth2_accounts)?;
+            let account = load_account(settings, seg, &oauth2_accounts)?;
             accounts.insert(account.account_id.clone(), account);
         }
-
-        let graph_oauth2_accounts = load_graph_oauth2_accounts()?;
-        let (ews_accounts, ews_oauth2_accounts) = load_ews_accounts()?;
-        let smtp_accounts = load_smtp_accounts(&oauth2_accounts)?;
 
         Ok(Self {
             accounts,
@@ -186,36 +173,53 @@ impl ServerConfig {
             ews_accounts,
             ews_oauth2_accounts,
             smtp_accounts,
-            smtp_write_enabled: parse_bool_env("MAIL_SMTP_WRITE_ENABLED", false)?,
-            smtp_save_sent: parse_opt_bool_env("MAIL_SMTP_SAVE_SENT")?,
+            smtp_write_enabled: parse_bool_setting(settings, "MAIL_SMTP_WRITE_ENABLED", false)?,
+            smtp_save_sent: parse_opt_bool_setting(settings, "MAIL_SMTP_SAVE_SENT")?,
             // Backward compat: MAIL_SMTP_TIMEOUT_MS (deprecated, single timeout)
             // is honored as the send timeout if set, but the new vars take priority.
-            smtp_connect_timeout_ms: parse_u64_env("MAIL_SMTP_CONNECT_TIMEOUT_MS", 30_000)?,
+            smtp_connect_timeout_ms: parse_u64_setting(
+                settings,
+                "MAIL_SMTP_CONNECT_TIMEOUT_MS",
+                30_000,
+            )?,
             smtp_send_timeout_ms: resolve_smtp_send_timeout(
-                env_opt_u64("MAIL_SMTP_SEND_TIMEOUT_MS")?,
-                env_opt_u64("MAIL_SMTP_TIMEOUT_MS")?,
+                setting_opt_u64(settings, "MAIL_SMTP_SEND_TIMEOUT_MS")?,
+                setting_opt_u64(settings, "MAIL_SMTP_TIMEOUT_MS")?,
             ),
-            write_enabled: parse_bool_env("MAIL_IMAP_WRITE_ENABLED", false)?,
-            drafts_enabled: parse_bool_env("MAIL_DRAFTS_ENABLED", false)?,
-            connect_timeout_ms: parse_u64_env("MAIL_IMAP_CONNECT_TIMEOUT_MS", 30_000)?,
-            greeting_timeout_ms: parse_u64_env("MAIL_IMAP_GREETING_TIMEOUT_MS", 15_000)?,
-            socket_timeout_ms: parse_u64_env("MAIL_IMAP_SOCKET_TIMEOUT_MS", 300_000)?,
-            cursor_ttl_seconds: parse_u64_env("MAIL_IMAP_CURSOR_TTL_SECONDS", 600)?,
-            cursor_max_entries: parse_usize_env("MAIL_IMAP_CURSOR_MAX_ENTRIES", 512)?,
-            max_mailboxes: clamp_max_mailboxes(parse_usize_env(
+            write_enabled: parse_bool_setting(settings, "MAIL_IMAP_WRITE_ENABLED", false)?,
+            drafts_enabled: parse_bool_setting(settings, "MAIL_DRAFTS_ENABLED", false)?,
+            connect_timeout_ms: parse_u64_setting(
+                settings,
+                "MAIL_IMAP_CONNECT_TIMEOUT_MS",
+                30_000,
+            )?,
+            greeting_timeout_ms: parse_u64_setting(
+                settings,
+                "MAIL_IMAP_GREETING_TIMEOUT_MS",
+                15_000,
+            )?,
+            socket_timeout_ms: parse_u64_setting(settings, "MAIL_IMAP_SOCKET_TIMEOUT_MS", 300_000)?,
+            cursor_ttl_seconds: parse_u64_setting(settings, "MAIL_IMAP_CURSOR_TTL_SECONDS", 600)?,
+            cursor_max_entries: parse_usize_setting(settings, "MAIL_IMAP_CURSOR_MAX_ENTRIES", 512)?,
+            max_mailboxes: clamp_max_mailboxes(parse_usize_setting(
+                settings,
                 "MAIL_IMAP_MAX_MAILBOXES",
                 DEFAULT_MAX_MAILBOXES,
             )?),
-            search_concurrency: parse_usize_env(
+            search_concurrency: parse_usize_setting(
+                settings,
                 "MAIL_IMAP_SEARCH_CONCURRENCY",
                 DEFAULT_SEARCH_CONCURRENCY,
             )?
             .clamp(1, MAX_SEARCH_CONCURRENCY),
-            attachment_download_dir: env::var("MAIL_ATTACHMENT_DOWNLOAD_DIR")
-                .ok()
-                .filter(|s| !s.trim().is_empty()),
+            attachment_download_dir: settings
+                .get("MAIL_ATTACHMENT_DOWNLOAD_DIR")
+                .filter(|s| !s.trim().is_empty())
+                .cloned(),
             attachment_upload_dir: parse_upload_dir(
-                env::var("MAIL_ATTACHMENT_UPLOAD_DIR").ok().as_deref(),
+                settings
+                    .get("MAIL_ATTACHMENT_UPLOAD_DIR")
+                    .map(String::as_str),
             )?,
         })
     }
@@ -289,7 +293,7 @@ fn provider_auto_saves_sent(host: &str) -> bool {
     h.contains("gmail") || h.contains("googlemail") || h.contains("zoho")
 }
 
-/// Load a single account configuration from environment
+/// Load a single IMAP account from the settings map.
 ///
 /// Reads `MAIL_IMAP_<SEGMENT>_HOST`, `_USER`, `_PASS`, `_PORT`, and `_SECURE`.
 /// Normalizes the segment name to lowercase for `account_id` (except `DEFAULT`
@@ -298,10 +302,11 @@ fn provider_auto_saves_sent(host: &str) -> bool {
 /// When a matching OAuth2 configuration exists for this segment, `PASS` becomes
 /// optional and `auth_method` is set to `OAuth2`.
 fn load_account(
+    settings: &Settings,
     segment: &str,
     oauth2_accounts: &HashMap<String, OAuth2AccountConfig>,
 ) -> AppResult<AccountConfig> {
-    let prefix = format!("MAIL_IMAP_{}_", sanitize_segment(segment));
+    let prefix = format!("MAIL_IMAP_{}_", segment.to_ascii_uppercase());
     let account_id = if segment == "DEFAULT" {
         "default".to_owned()
     } else {
@@ -310,12 +315,12 @@ fn load_account(
 
     let has_oauth2 = oauth2_accounts.contains_key(&account_id);
 
-    let host = required_env(&format!("{prefix}HOST"))?;
-    let user = required_env(&format!("{prefix}USER"))?;
+    let host = required_setting(settings, &format!("{prefix}HOST"))?;
+    let user = required_setting(settings, &format!("{prefix}USER"))?;
 
     // Password is optional when OAuth2 is configured for this account
-    let pass = match env::var(format!("{prefix}PASS")) {
-        Ok(v) if !v.trim().is_empty() => Some(SecretString::new(v.into())),
+    let pass = match setting(settings, &format!("{prefix}PASS")) {
+        Some(v) if !v.trim().is_empty() => Some(SecretString::new(v.to_owned().into())),
         _ if has_oauth2 => None,
         _ => {
             return Err(AppError::InvalidInput("No IMAP accounts configured. Set MAIL_IMAP_<ID>_HOST/USER/PASS (or configure OAuth2 via MAIL_OAUTH2_<ID>_*).\nmail-mcp startup error: missing PASS.".to_string()));
@@ -334,160 +339,131 @@ fn load_account(
     Ok(AccountConfig {
         account_id,
         host,
-        port: parse_u16_env(&format!("{prefix}PORT"), 993)?,
-        secure: parse_bool_env(&format!("{prefix}SECURE"), true)?,
+        port: parse_u16_setting(settings, &format!("{prefix}PORT"), 993)?,
+        secure: parse_bool_setting(settings, &format!("{prefix}SECURE"), true)?,
         user,
         pass,
         auth_method,
     })
 }
 
-/// Discover and load OAuth2 account configurations from environment.
+/// Discover and load OAuth2 account configurations from the settings map.
 ///
-/// Scans for `MAIL_OAUTH2_*_PROVIDER` variables. For each found, loads
+/// Scans for `MAIL_OAUTH2_*_PROVIDER` keys. For each found, loads
 /// `CLIENT_ID`, `CLIENT_SECRET`, and `REFRESH_TOKEN`.
-fn load_oauth2_accounts() -> AppResult<HashMap<String, OAuth2AccountConfig>> {
-    let pattern = Regex::new(r"^MAIL_OAUTH2_([A-Z0-9_]+)_PROVIDER$")
-        .map_err(|e| AppError::Internal(format!("invalid oauth2 regex: {e}")))?;
-
-    let mut segments: Vec<String> = env::vars()
-        .filter_map(|(k, _)| {
-            pattern
-                .captures(&k)
-                .and_then(|c| c.get(1).map(|m| m.as_str().to_owned()))
-        })
-        .collect();
-    segments.sort();
-    segments.dedup();
+fn load_oauth2_accounts(settings: &Settings) -> AppResult<HashMap<String, OAuth2AccountConfig>> {
+    let segments = segments_with_suffix(settings, "MAIL_OAUTH2_", "PROVIDER");
 
     let mut oauth2_accounts = HashMap::new();
     for seg in segments {
-        let prefix = format!("MAIL_OAUTH2_{}_", sanitize_segment(&seg));
-        let account_id = if seg == "DEFAULT" {
-            "default".to_owned()
-        } else {
-            seg.to_ascii_lowercase()
-        };
-
-        let provider_str = required_oauth2_env(&format!("{prefix}PROVIDER"), &account_id)?;
-        let provider = OAuth2Provider::parse(&provider_str)?;
-        let client_id = required_oauth2_env(&format!("{prefix}CLIENT_ID"), &account_id)?;
-        let client_secret = required_oauth2_env(&format!("{prefix}CLIENT_SECRET"), &account_id)?;
-        let refresh_token = required_oauth2_env(&format!("{prefix}REFRESH_TOKEN"), &account_id)?;
-
+        let prefix = format!("MAIL_OAUTH2_{}_", seg.to_ascii_uppercase());
+        let account_id = account_id_from_segment(&seg);
         oauth2_accounts.insert(
-            account_id,
-            OAuth2AccountConfig {
-                provider,
-                client_id,
-                client_secret: SecretString::new(client_secret.into()),
-                refresh_token: SecretString::new(refresh_token.into()),
-            },
+            account_id.clone(),
+            load_oauth2_fields(settings, &prefix, &account_id)?,
         );
     }
 
     Ok(oauth2_accounts)
 }
 
-/// Discover and load Graph API OAuth2 configurations from environment.
+/// Discover and load Graph API OAuth2 configurations from the settings map.
 ///
-/// Scans for `MAIL_GRAPH_*_PROVIDER` variables. These are separate from
+/// Scans for `MAIL_GRAPH_*_PROVIDER` keys. These are separate from
 /// `MAIL_OAUTH2_*` to allow different scopes: IMAP OAuth2 uses
 /// `outlook.office.com/IMAP.*` scopes while Graph uses
 /// `graph.microsoft.com/Mail.*` scopes.
-fn load_graph_oauth2_accounts() -> AppResult<HashMap<String, OAuth2AccountConfig>> {
-    let pattern = Regex::new(r"^MAIL_GRAPH_([A-Z0-9_]+)_PROVIDER$")
-        .map_err(|e| AppError::Internal(format!("invalid graph oauth2 regex: {e}")))?;
-
-    let mut segments: Vec<String> = env::vars()
-        .filter_map(|(k, _)| {
-            pattern
-                .captures(&k)
-                .and_then(|c| c.get(1).map(|m| m.as_str().to_owned()))
-        })
-        .collect();
-    segments.sort();
-    segments.dedup();
+fn load_graph_oauth2_accounts(
+    settings: &Settings,
+) -> AppResult<HashMap<String, OAuth2AccountConfig>> {
+    let segments = segments_with_suffix(settings, "MAIL_GRAPH_", "PROVIDER");
 
     let mut accounts = HashMap::new();
     for seg in segments {
-        let prefix = format!("MAIL_GRAPH_{}_", sanitize_segment(&seg));
-        let account_id = if seg == "DEFAULT" {
-            "default".to_owned()
-        } else {
-            seg.to_ascii_lowercase()
-        };
-
-        let provider_str = required_oauth2_env(&format!("{prefix}PROVIDER"), &account_id)?;
-        let provider = OAuth2Provider::parse(&provider_str)?;
-        let client_id = required_oauth2_env(&format!("{prefix}CLIENT_ID"), &account_id)?;
-        let client_secret = required_oauth2_env(&format!("{prefix}CLIENT_SECRET"), &account_id)?;
-        let refresh_token = required_oauth2_env(&format!("{prefix}REFRESH_TOKEN"), &account_id)?;
-
+        let prefix = format!("MAIL_GRAPH_{}_", seg.to_ascii_uppercase());
+        let account_id = account_id_from_segment(&seg);
         accounts.insert(
-            account_id,
-            OAuth2AccountConfig {
-                provider,
-                client_id,
-                client_secret: SecretString::new(client_secret.into()),
-                refresh_token: SecretString::new(refresh_token.into()),
-            },
+            account_id.clone(),
+            load_oauth2_fields(settings, &prefix, &account_id)?,
         );
     }
 
     Ok(accounts)
 }
 
-/// Discover and load EWS account configurations from environment.
+fn load_oauth2_fields(
+    settings: &Settings,
+    prefix: &str,
+    account_id: &str,
+) -> AppResult<OAuth2AccountConfig> {
+    let provider_str =
+        required_setting_for(settings, &format!("{prefix}PROVIDER"), account_id, "OAuth2")?;
+    let provider = OAuth2Provider::parse(&provider_str).map_err(|_| {
+        AppError::InvalidInput(format!("invalid OAuth2 provider setting {prefix}PROVIDER"))
+    })?;
+    let client_id = required_setting_for(
+        settings,
+        &format!("{prefix}CLIENT_ID"),
+        account_id,
+        "OAuth2",
+    )?;
+    let client_secret = required_setting_for(
+        settings,
+        &format!("{prefix}CLIENT_SECRET"),
+        account_id,
+        "OAuth2",
+    )?;
+    let refresh_token = required_setting_for(
+        settings,
+        &format!("{prefix}REFRESH_TOKEN"),
+        account_id,
+        "OAuth2",
+    )?;
+    Ok(OAuth2AccountConfig {
+        provider,
+        client_id,
+        client_secret: SecretString::new(client_secret.into()),
+        refresh_token: SecretString::new(refresh_token.into()),
+    })
+}
+
+/// Discover and load EWS account configurations from the settings map.
 ///
-/// Scans for `MAIL_EWS_*_USER` variables. For each found, loads
-/// OAuth2 credentials from `MAIL_EWS_*_CLIENT_ID`, etc.
-fn load_ews_accounts() -> AppResult<(
+/// Scans for `MAIL_EWS_*_USER` keys. For each found, loads OAuth2 credentials
+/// from `MAIL_EWS_*_CLIENT_ID`, etc.
+fn load_ews_accounts(
+    settings: &Settings,
+) -> AppResult<(
     HashMap<String, crate::ews::EwsAccountConfig>,
     HashMap<String, OAuth2AccountConfig>,
 )> {
-    let pattern = Regex::new(r"^MAIL_EWS_([A-Z0-9_]+)_USER$")
-        .map_err(|e| AppError::Internal(format!("invalid ews regex: {e}")))?;
-
-    let mut segments: Vec<String> = env::vars()
-        .filter_map(|(k, _)| {
-            pattern
-                .captures(&k)
-                .and_then(|c| c.get(1).map(|m| m.as_str().to_owned()))
-        })
-        .collect();
-    segments.sort();
-    segments.dedup();
+    let segments = segments_with_suffix(settings, "MAIL_EWS_", "USER");
 
     let mut ews_accounts = HashMap::new();
     let mut ews_oauth2 = HashMap::new();
 
     for seg in segments {
-        let prefix = format!("MAIL_EWS_{}_", sanitize_segment(&seg));
-        let account_id = if seg == "DEFAULT" {
-            "default".to_owned()
-        } else {
-            seg.to_ascii_lowercase()
-        };
+        let prefix = format!("MAIL_EWS_{}_", seg.to_ascii_uppercase());
+        let account_id = account_id_from_segment(&seg);
 
-        let user = match env::var(format!("{prefix}USER")) {
-            Ok(v) if !v.trim().is_empty() => v,
+        let user = match setting(settings, &format!("{prefix}USER")) {
+            Some(v) if !v.trim().is_empty() => v.to_owned(),
             _ => continue,
         };
 
         ews_accounts.insert(account_id.clone(), crate::ews::EwsAccountConfig { user });
 
         // Load OAuth2 for EWS
-        let client_id = match env::var(format!("{prefix}CLIENT_ID")) {
-            Ok(v) if !v.trim().is_empty() => v,
+        let client_id = match setting(settings, &format!("{prefix}CLIENT_ID")) {
+            Some(v) if !v.trim().is_empty() => v.to_owned(),
             _ => "d3590ed6-52b3-4102-aeff-aad2292ab01c".to_owned(), // Default: Microsoft Office
         };
-        let client_secret = match env::var(format!("{prefix}CLIENT_SECRET")) {
-            Ok(v) if !v.trim().is_empty() => v,
+        let client_secret = match setting(settings, &format!("{prefix}CLIENT_SECRET")) {
+            Some(v) if !v.trim().is_empty() => v.to_owned(),
             _ => "none".to_owned(),
         };
-        let refresh_token = match env::var(format!("{prefix}REFRESH_TOKEN")) {
-            Ok(v) if !v.trim().is_empty() => v,
+        let refresh_token = match setting(settings, &format!("{prefix}REFRESH_TOKEN")) {
+            Some(v) if !v.trim().is_empty() => v.to_owned(),
             _ => continue,
         };
 
@@ -505,52 +481,40 @@ fn load_ews_accounts() -> AppResult<(
     Ok((ews_accounts, ews_oauth2))
 }
 
-/// Discover and load SMTP account configurations from environment.
+/// Discover and load SMTP account configurations from the settings map.
 ///
-/// Scans for `MAIL_SMTP_*_HOST` variables. For each found, loads
-/// `PORT`, `USER`, `PASS`, and `SECURE`. OAuth2 configs are checked to
-/// determine the authentication method.
+/// Scans for `MAIL_SMTP_*_HOST` keys. For each found, loads `PORT`, `USER`,
+/// `PASS`, and `SECURE`. OAuth2 configs are checked to determine the
+/// authentication method.
 fn load_smtp_accounts(
+    settings: &Settings,
     oauth2_accounts: &HashMap<String, OAuth2AccountConfig>,
 ) -> AppResult<HashMap<String, SmtpAccountConfig>> {
-    let pattern = Regex::new(r"^MAIL_SMTP_([A-Z0-9_]+)_HOST$")
-        .map_err(|e| AppError::Internal(format!("invalid smtp regex: {e}")))?;
-
-    let mut segments: Vec<String> = env::vars()
-        .filter_map(|(k, _)| {
-            pattern
-                .captures(&k)
-                .and_then(|c| c.get(1).map(|m| m.as_str().to_owned()))
-        })
-        .collect();
-    segments.sort();
-    segments.dedup();
+    let segments = segments_with_suffix(settings, "MAIL_SMTP_", "HOST");
 
     let mut smtp_accounts = HashMap::new();
     for seg in segments {
-        let prefix = format!("MAIL_SMTP_{}_", sanitize_segment(&seg));
-        let account_id = if seg == "DEFAULT" {
-            "default".to_owned()
-        } else {
-            seg.to_ascii_lowercase()
-        };
+        let prefix = format!("MAIL_SMTP_{}_", seg.to_ascii_uppercase());
+        let account_id = account_id_from_segment(&seg);
 
         let has_oauth2 = oauth2_accounts.contains_key(&account_id);
 
-        let host = required_smtp_env(&format!("{prefix}HOST"), &account_id)?;
-        let user = required_smtp_env(&format!("{prefix}USER"), &account_id)?;
+        let host = required_setting_for(settings, &format!("{prefix}HOST"), &account_id, "SMTP")?;
+        let user = required_setting_for(settings, &format!("{prefix}USER"), &account_id, "SMTP")?;
 
-        let pass = match env::var(format!("{prefix}PASS")) {
-            Ok(v) if !v.trim().is_empty() => Some(SecretString::new(v.into())),
+        let pass = match setting(settings, &format!("{prefix}PASS")) {
+            Some(v) if !v.trim().is_empty() => Some(SecretString::new(v.to_owned().into())),
             _ if has_oauth2 => None,
             _ => None, // SMTP password is optional (some configs rely on OAuth2 only)
         };
 
         let default_port: u16 = 587; // STARTTLS default
-        let port = parse_u16_env(&format!("{prefix}PORT"), default_port)?;
+        let port = parse_u16_setting(settings, &format!("{prefix}PORT"), default_port)?;
 
-        let security = match env::var(format!("{prefix}SECURE")) {
-            Ok(v) if !v.trim().is_empty() => SmtpSecurity::parse(&v)?,
+        let security = match setting(settings, &format!("{prefix}SECURE")) {
+            Some(v) if !v.trim().is_empty() => SmtpSecurity::parse(v).map_err(|_| {
+                AppError::InvalidInput(format!("invalid SMTP security setting {prefix}SECURE"))
+            })?,
             _ => SmtpSecurity::Starttls,
         };
 
@@ -560,16 +524,16 @@ fn load_smtp_accounts(
             AuthMethod::Password
         };
 
-        let save_sent = parse_opt_bool_env(&format!("{prefix}SAVE_SENT"))?;
+        let save_sent = parse_opt_bool_setting(settings, &format!("{prefix}SAVE_SENT"))?;
 
-        let from_email = match env::var(format!("{prefix}FROM_EMAIL")) {
-            Ok(v) => {
+        let from_email = match setting(settings, &format!("{prefix}FROM_EMAIL")) {
+            Some(v) => {
                 let v = v.trim();
                 if v.is_empty() {
                     None
                 } else if !is_valid_email(v) {
                     return Err(AppError::InvalidInput(format!(
-                        "SMTP account '{account_id}': {prefix}FROM_EMAIL='{v}' is not a valid email address"
+                        "SMTP account '{account_id}': {prefix}FROM_EMAIL is not a valid email address"
                     )));
                 } else {
                     Some(v.to_owned())
@@ -597,12 +561,29 @@ fn load_smtp_accounts(
     Ok(smtp_accounts)
 }
 
-/// Read a required SMTP environment variable, with a clear error message.
-fn required_smtp_env(key: &str, account_id: &str) -> AppResult<String> {
-    match env::var(key) {
-        Ok(v) if !v.trim().is_empty() => Ok(v),
+fn account_id_from_segment(segment: &str) -> String {
+    if segment == "DEFAULT" {
+        "default".to_owned()
+    } else {
+        segment.to_ascii_lowercase()
+    }
+}
+
+fn setting<'a>(settings: &'a Settings, key: &str) -> Option<&'a str> {
+    settings.get(key).map(String::as_str)
+}
+
+/// Read a required account setting, with a clear error message.
+fn required_setting_for(
+    settings: &Settings,
+    key: &str,
+    account_id: &str,
+    protocol: &str,
+) -> AppResult<String> {
+    match setting(settings, key) {
+        Some(v) if !v.trim().is_empty() => Ok(v.to_owned()),
         _ => Err(AppError::InvalidInput(format!(
-            "SMTP account '{account_id}' is missing {key}"
+            "{protocol} account '{account_id}' is missing {key}"
         ))),
     }
 }
@@ -624,20 +605,10 @@ fn is_valid_email(value: &str) -> bool {
     !local.is_empty() && !domain.is_empty() && !value.contains(char::is_whitespace)
 }
 
-/// Read a required OAuth2 environment variable, with a clear error message.
-fn required_oauth2_env(key: &str, account_id: &str) -> AppResult<String> {
-    match env::var(key) {
-        Ok(v) if !v.trim().is_empty() => Ok(v),
-        _ => Err(AppError::InvalidInput(format!(
-            "OAuth2 account '{account_id}' is missing {key}"
-        ))),
-    }
-}
-
-/// Read a required environment variable, returning error if missing or empty
-fn required_env(key: &str) -> AppResult<String> {
-    match env::var(key) {
-        Ok(v) if !v.trim().is_empty() => Ok(v),
+/// Read a required setting, returning an error if it is missing or empty.
+fn required_setting(settings: &Settings, key: &str) -> AppResult<String> {
+    match setting(settings, key) {
+        Some(v) if !v.trim().is_empty() => Ok(v.to_owned()),
         _ => {
             let var_name = key.strip_prefix("MAIL_IMAP_").unwrap_or(key);
             let suffix = var_name.split('_').next_back().unwrap_or(var_name);
@@ -648,39 +619,20 @@ fn required_env(key: &str) -> AppResult<String> {
     }
 }
 
-/// Sanitize an account segment to uppercase alphanumeric/underscore
-///
-/// Non-alphanumeric characters are replaced with underscores, and leading/
-/// trailing underscores are trimmed.
-fn sanitize_segment(seg: &str) -> String {
-    let mut out = String::with_capacity(seg.len());
-    for ch in seg.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_uppercase());
-        } else {
-            out.push('_');
-        }
-    }
-    out.trim_matches('_').to_owned()
-}
-
-/// Parse a boolean environment variable with flexible values
+/// Parse a boolean setting with flexible values.
 ///
 /// Accepts: `1`, `true`, `yes`, `y`, `on` (truthy) or `0`, `false`, `no`,
 /// `n`, `off` (falsy). Case-insensitive. Returns `default` if unset.
 ///
 /// # Errors
 ///
-/// Returns `InvalidInput` if the variable is set to an unrecognized value.
-fn parse_bool_env(key: &str, default: bool) -> AppResult<bool> {
-    match env::var(key) {
-        Ok(v) => parse_bool_value(&v).ok_or_else(|| {
-            AppError::InvalidInput(format!("invalid boolean environment variable {key}: '{v}'"))
-        }),
-        Err(VarError::NotPresent) => Ok(default),
-        Err(VarError::NotUnicode(_)) => Err(AppError::InvalidInput(format!(
-            "environment variable {key} contains non-unicode data"
-        ))),
+/// Returns `InvalidInput` if the setting is present but unrecognized. The
+/// value is omitted so a misplaced secret is not echoed.
+fn parse_bool_setting(settings: &Settings, key: &str, default: bool) -> AppResult<bool> {
+    match setting(settings, key) {
+        Some(v) => parse_bool_value(v)
+            .ok_or_else(|| AppError::InvalidInput(format!("invalid boolean setting {key}"))),
+        None => Ok(default),
     }
 }
 
@@ -698,15 +650,13 @@ fn parse_upload_dir(value: Option<&str>) -> AppResult<Option<PathBuf>> {
     let Some(raw) = value.map(str::trim).filter(|v| !v.is_empty()) else {
         return Ok(None);
     };
-    let dir = std::fs::canonicalize(raw).map_err(|e| {
-        AppError::InvalidInput(format!(
-            "MAIL_ATTACHMENT_UPLOAD_DIR '{raw}' is not usable: {e}"
-        ))
+    let dir = std::fs::canonicalize(raw).map_err(|_| {
+        AppError::InvalidInput("MAIL_ATTACHMENT_UPLOAD_DIR is not usable".to_owned())
     })?;
     if !dir.is_dir() {
-        return Err(AppError::InvalidInput(format!(
-            "MAIL_ATTACHMENT_UPLOAD_DIR '{raw}' is not a directory"
-        )));
+        return Err(AppError::InvalidInput(
+            "MAIL_ATTACHMENT_UPLOAD_DIR is not a directory".to_owned(),
+        ));
     }
     Ok(Some(dir))
 }
@@ -719,64 +669,45 @@ fn parse_bool_value(value: &str) -> Option<bool> {
     }
 }
 
-/// Parse an optional boolean environment variable.
+/// Parse an optional boolean setting.
 ///
-/// Returns `Ok(None)` when the variable is unset or empty, distinguishing
+/// Returns `Ok(None)` when the setting is unset or empty, distinguishing
 /// "not configured" from an explicit `true`/`false`. Used for settings with
 /// a computed (non-constant) default, such as per-account / provider-aware
 /// `SAVE_SENT`.
 ///
 /// # Errors
 ///
-/// Returns `InvalidInput` if the variable is set to an unrecognized value.
-fn parse_opt_bool_env(key: &str) -> AppResult<Option<bool>> {
-    match env::var(key) {
-        Ok(v) if v.trim().is_empty() => Ok(None),
-        Ok(v) => parse_bool_value(&v).map(Some).ok_or_else(|| {
-            AppError::InvalidInput(format!("invalid boolean environment variable {key}: '{v}'"))
-        }),
-        Err(VarError::NotPresent) => Ok(None),
-        Err(VarError::NotUnicode(_)) => Err(AppError::InvalidInput(format!(
-            "environment variable {key} contains non-unicode data"
-        ))),
+/// Returns `InvalidInput` if the setting is present but unrecognized.
+fn parse_opt_bool_setting(settings: &Settings, key: &str) -> AppResult<Option<bool>> {
+    match setting(settings, key) {
+        Some(v) if v.trim().is_empty() => Ok(None),
+        Some(v) => parse_bool_value(v)
+            .map(Some)
+            .ok_or_else(|| AppError::InvalidInput(format!("invalid boolean setting {key}"))),
+        None => Ok(None),
     }
 }
 
-/// Parse a `u16` environment variable with default fallback
-///
-/// Returns `default` if unset.
-///
-/// # Errors
-///
-/// Returns `InvalidInput` if the variable is set but not a valid `u16`.
-fn parse_u16_env(key: &str, default: u16) -> AppResult<u16> {
-    match env::var(key) {
-        Ok(v) => v.parse::<u16>().map_err(|_| {
-            AppError::InvalidInput(format!("invalid u16 environment variable {key}: '{v}'"))
-        }),
-        Err(VarError::NotPresent) => Ok(default),
-        Err(VarError::NotUnicode(_)) => Err(AppError::InvalidInput(format!(
-            "environment variable {key} contains non-unicode data"
-        ))),
+/// Parse a `u16` setting, returning `default` when unset.
+fn parse_u16_setting(settings: &Settings, key: &str, default: u16) -> AppResult<u16> {
+    match setting(settings, key) {
+        Some(v) => v
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| AppError::InvalidInput(format!("invalid u16 setting {key}"))),
+        None => Ok(default),
     }
 }
 
-/// Parse a `u64` environment variable with default fallback
-///
-/// Returns `default` if unset.
-///
-/// # Errors
-///
-/// Returns `InvalidInput` if the variable is set but not a valid `u64`.
-fn parse_u64_env(key: &str, default: u64) -> AppResult<u64> {
-    match env::var(key) {
-        Ok(v) => v.parse::<u64>().map_err(|_| {
-            AppError::InvalidInput(format!("invalid u64 environment variable {key}: '{v}'"))
-        }),
-        Err(VarError::NotPresent) => Ok(default),
-        Err(VarError::NotUnicode(_)) => Err(AppError::InvalidInput(format!(
-            "environment variable {key} contains non-unicode data"
-        ))),
+/// Parse a `u64` setting, returning `default` when unset.
+fn parse_u64_setting(settings: &Settings, key: &str, default: u64) -> AppResult<u64> {
+    match setting(settings, key) {
+        Some(v) => v
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| AppError::InvalidInput(format!("invalid u64 setting {key}"))),
+        None => Ok(default),
     }
 }
 
@@ -798,39 +729,27 @@ fn clamp_max_mailboxes(n: usize) -> usize {
     n.clamp(1, MAX_MAILBOXES_LIMIT)
 }
 
-/// Parse a `usize` environment variable with default fallback
-///
-/// Returns `default` if unset.
-///
-/// # Errors
-///
-/// Returns `InvalidInput` if the variable is set but not a valid `usize`.
-fn parse_usize_env(key: &str, default: usize) -> AppResult<usize> {
-    match env::var(key) {
-        Ok(v) => v.parse::<usize>().map_err(|_| {
-            AppError::InvalidInput(format!("invalid usize environment variable {key}: '{v}'"))
-        }),
-        Err(VarError::NotPresent) => Ok(default),
-        Err(VarError::NotUnicode(_)) => Err(AppError::InvalidInput(format!(
-            "environment variable {key} contains non-unicode data"
-        ))),
+/// Parse a `usize` setting, returning `default` when unset.
+fn parse_usize_setting(settings: &Settings, key: &str, default: usize) -> AppResult<usize> {
+    match setting(settings, key) {
+        Some(v) => v
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| AppError::InvalidInput(format!("invalid usize setting {key}"))),
+        None => Ok(default),
     }
 }
 
-/// Read a `u64` env var, returning `None` if unset.
-///
-/// # Errors
-///
-/// Returns `InvalidInput` if the variable is set but not a valid `u64`.
-fn env_opt_u64(key: &str) -> AppResult<Option<u64>> {
-    match env::var(key) {
-        Ok(v) => v.parse::<u64>().map(Some).map_err(|_| {
-            AppError::InvalidInput(format!("invalid u64 environment variable {key}: '{v}'"))
-        }),
-        Err(VarError::NotPresent) => Ok(None),
-        Err(VarError::NotUnicode(_)) => Err(AppError::InvalidInput(format!(
-            "environment variable {key} contains non-unicode data"
-        ))),
+/// Read an optional `u64` setting. Empty and missing values are `None`.
+fn setting_opt_u64(settings: &Settings, key: &str) -> AppResult<Option<u64>> {
+    match setting(settings, key) {
+        Some(v) if v.trim().is_empty() => Ok(None),
+        Some(v) => v
+            .trim()
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|_| AppError::InvalidInput(format!("invalid u64 setting {key}"))),
+        None => Ok(None),
     }
 }
 
@@ -1064,5 +983,155 @@ mod tests {
         assert_eq!(clamp_max_mailboxes(0), 1);
         assert_eq!(clamp_max_mailboxes(1000), 1000);
         assert_eq!(clamp_max_mailboxes(usize::MAX), MAX_MAILBOXES_LIMIT);
+    }
+
+    fn settings(pairs: &[(&str, &str)]) -> crate::config_file::Settings {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn smtp_graph_and_ews_only_accounts_load_without_imap() {
+        let secret = "super-secret-token-value";
+        let smtp = ServerConfig::load(&settings(&[
+            ("MAIL_SMTP_WORK_HOST", "smtp.example.com"),
+            ("MAIL_SMTP_WORK_USER", "user@example.com"),
+            ("MAIL_SMTP_WORK_PASS", secret),
+        ]))
+        .unwrap();
+        assert!(smtp.accounts.is_empty());
+        assert!(smtp.smtp_accounts.contains_key("work"));
+        assert_eq!(smtp.smtp_accounts["work"].port, 587);
+        assert_eq!(smtp.smtp_accounts["work"].security, SmtpSecurity::Starttls);
+
+        let graph = ServerConfig::load(&settings(&[
+            ("MAIL_GRAPH_WORK_PROVIDER", "microsoft"),
+            ("MAIL_GRAPH_WORK_CLIENT_ID", "id"),
+            ("MAIL_GRAPH_WORK_CLIENT_SECRET", secret),
+            ("MAIL_GRAPH_WORK_REFRESH_TOKEN", "refresh"),
+        ]))
+        .unwrap();
+        assert!(graph.accounts.is_empty());
+        assert!(graph.graph_oauth2_accounts.contains_key("work"));
+        assert!(graph.smtp_accounts.is_empty());
+
+        let ews = ServerConfig::load(&settings(&[
+            ("MAIL_EWS_WORK_USER", "ews@example.com"),
+            ("MAIL_EWS_WORK_REFRESH_TOKEN", "refresh"),
+        ]))
+        .unwrap();
+        assert!(ews.accounts.is_empty());
+        assert!(ews.ews_accounts.contains_key("work"));
+        assert!(ews.ews_oauth2_accounts.contains_key("work"));
+
+        let imap = ServerConfig::load(&settings(&[
+            ("MAIL_IMAP_WORK_HOST", "imap.example.com"),
+            ("MAIL_IMAP_WORK_USER", "user@example.com"),
+            ("MAIL_IMAP_WORK_PASS", secret),
+        ]))
+        .unwrap();
+        assert!(imap.accounts.contains_key("work"));
+        assert_eq!(imap.accounts["work"].port, 993);
+        assert!(imap.accounts["work"].secure);
+        assert_eq!(imap.accounts["work"].auth_method, AuthMethod::Password);
+    }
+
+    #[test]
+    fn missing_every_account_still_requires_default_imap() {
+        let secret = "super-secret-token-value";
+        let error = ServerConfig::load(&settings(&[("MAIL_IMAP_WORK_PASS", secret)])).unwrap_err();
+        assert!(!error.to_string().contains(secret));
+        assert!(ServerConfig::load(&crate::config_file::Settings::new()).is_err());
+        assert!(
+            ServerConfig::load(&settings(&[
+                ("MAIL_OAUTH2_WORK_PROVIDER", "google"),
+                ("MAIL_OAUTH2_WORK_CLIENT_ID", "id"),
+                ("MAIL_OAUTH2_WORK_CLIENT_SECRET", secret),
+                ("MAIL_OAUTH2_WORK_REFRESH_TOKEN", "refresh"),
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn invalid_setting_does_not_echo_another_fields_secret() {
+        let secret = "super-secret-token-value";
+        let error = ServerConfig::load(&settings(&[
+            ("MAIL_IMAP_WORK_HOST", "imap.example.com"),
+            ("MAIL_IMAP_WORK_USER", "user@example.com"),
+            ("MAIL_IMAP_WORK_PASS", secret),
+            ("MAIL_IMAP_WRITE_ENABLED", "nope"),
+        ]))
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("MAIL_IMAP_WRITE_ENABLED"));
+        assert!(!message.contains(secret));
+    }
+
+    #[test]
+    fn work_and_work_underscore_keep_isolated_credentials() {
+        use secrecy::ExposeSecret;
+        let work_secret = "secret-for-work";
+        let trail_secret = "secret-for-work-underscore";
+        let loaded = ServerConfig::load(&settings(&[
+            ("MAIL_IMAP_WORK_HOST", "imap.work.example"),
+            ("MAIL_IMAP_WORK_USER", "work@example.com"),
+            ("MAIL_IMAP_WORK_PASS", work_secret),
+            ("MAIL_IMAP_WORK__HOST", "imap.trail.example"),
+            ("MAIL_IMAP_WORK__USER", "trail@example.com"),
+            ("MAIL_IMAP_WORK__PASS", trail_secret),
+        ]))
+        .unwrap();
+        assert_eq!(loaded.accounts["work"].host, "imap.work.example");
+        assert_eq!(loaded.accounts["work_"].host, "imap.trail.example");
+        assert_eq!(
+            loaded.accounts["work"]
+                .pass
+                .as_ref()
+                .unwrap()
+                .expose_secret(),
+            work_secret
+        );
+        assert_eq!(
+            loaded.accounts["work_"]
+                .pass
+                .as_ref()
+                .unwrap()
+                .expose_secret(),
+            trail_secret
+        );
+    }
+
+    #[test]
+    fn invalid_provider_security_and_upload_dir_omit_raw_values() {
+        let secret = "super-secret-token-value";
+        let provider = ServerConfig::load(&settings(&[
+            ("MAIL_OAUTH2_WORK_PROVIDER", secret),
+            ("MAIL_OAUTH2_WORK_CLIENT_ID", "id"),
+            ("MAIL_OAUTH2_WORK_CLIENT_SECRET", "c"),
+            ("MAIL_OAUTH2_WORK_REFRESH_TOKEN", "r"),
+        ]))
+        .unwrap_err();
+        let message = provider.to_string();
+        assert!(message.contains("MAIL_OAUTH2_WORK_PROVIDER"));
+        assert!(!message.contains(secret));
+
+        let security = ServerConfig::load(&settings(&[
+            ("MAIL_SMTP_WORK_HOST", "smtp.example.com"),
+            ("MAIL_SMTP_WORK_USER", "user@example.com"),
+            ("MAIL_SMTP_WORK_SECURE", secret),
+        ]))
+        .unwrap_err();
+        let message = security.to_string();
+        assert!(message.contains("MAIL_SMTP_WORK_SECURE"));
+        assert!(!message.contains(secret));
+
+        let missing = format!("/no/such/{secret}");
+        let upload = parse_upload_dir(Some(&missing)).unwrap_err();
+        let message = upload.to_string();
+        assert!(message.contains("MAIL_ATTACHMENT_UPLOAD_DIR"));
+        assert!(!message.contains(secret));
     }
 }
