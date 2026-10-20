@@ -14,7 +14,8 @@ and account requirements come from [`src/config.rs`](../src/config.rs).
 The configuration path is selected in this order:
 
 1. `mail-mcp --config PATH`, including for `config` and `accounts` commands.
-2. A non-empty `MAIL_CONFIG_FILE` in the process environment.
+2. A non-empty `MAIL_CONFIG_FILE` in the process environment. The value `none`
+   selects no file at all (see below).
 3. `~/.mail-mcp/config.toml`, using `HOME`, or `USERPROFILE` when `HOME` is unset
    or empty.
 
@@ -23,6 +24,15 @@ Relative paths resolve from the process working directory. Prefer an absolute
 path in MCP-client configuration. A missing explicitly selected file is a
 startup error, not a fallback to environment-only mode. Unreadable or malformed
 TOML also fails instead of being silently ignored.
+
+The default file applies to every `mail-mcp` process the user starts without
+`--config` or `MAIL_CONFIG_FILE`, so its accounts and write settings reach every
+MCP client on the machine. A client configured only through environment
+variables can opt out with `MAIL_CONFIG_FILE=none`: the server then reads only
+the process environment and the legacy `.env` fallback. `--config` still wins
+over `none`. Configuration and account
+commands need a file, so they fail under `none` unless `--config` is given. A
+file that is literally named `none` can be selected as `./none`.
 
 For each recognized setting, a process `MAIL_*` variable overrides the matching
 TOML field. The merge is field-by-field: an environment password can replace a
@@ -122,10 +132,6 @@ cursor_ttl_seconds = 600
 cursor_max_entries = 512
 max_mailboxes = 200
 search_concurrency = 4
-transport = "stdio"
-http_host = "127.0.0.1"
-http_port = 8000
-http_path = "/mcp"
 # Leave smtp_save_sent unset to keep provider-aware defaults.
 # Optional directories: replace these paths before uncommenting.
 # attachment_download_dir = "/absolute/path/mail-downloads"
@@ -150,7 +156,9 @@ from_email = "reader@gmail.com"
 
 `attachment_upload_dir`, when set, must name an existing directory. It confines
 outbound file attachments; see [outbound attachment scope](security.md#outbound-attachment-scope).
-The HTTP settings take effect only when `transport = "http"`; see
+Transport settings (`MAIL_MCP_TRANSPORT` and `MAIL_MCP_HTTP_*`) are not TOML
+fields: they are read only from the process environment or `.env`, so a shared
+file cannot move stdio clients to HTTP. See
 [remote HTTP transport](#remote-http-transport) before exposing a listener.
 
 ### OAuth2, Graph, and EWS Examples
@@ -224,10 +232,6 @@ be supplied by their corresponding process environment variable instead.
 | `search_concurrency` | integer | `4`, clamped to `1..=8` | `MAIL_IMAP_SEARCH_CONCURRENCY` |
 | `attachment_download_dir` | string | Unset; downloads use the system temp directory unless the tool supplies `output_dir` | `MAIL_ATTACHMENT_DOWNLOAD_DIR` |
 | `attachment_upload_dir` | string | Unset; any readable outbound attachment path is allowed | `MAIL_ATTACHMENT_UPLOAD_DIR` |
-| `transport` | string | `"stdio"`; `"http"` opts into streamable HTTP | `MAIL_MCP_TRANSPORT` |
-| `http_host` | string | `"127.0.0.1"`; IP literal, not a hostname | `MAIL_MCP_HTTP_HOST` |
-| `http_port` | integer | `8000` | `MAIL_MCP_HTTP_PORT` |
-| `http_path` | string | `"/mcp"`; must start with `/` | `MAIL_MCP_HTTP_PATH` |
 
 `MAIL_SMTP_TIMEOUT_MS` is the legacy environment name for the send timeout.
 An explicit `MAIL_SMTP_SEND_TIMEOUT_MS` wins; otherwise the legacy process
@@ -575,6 +579,8 @@ MAIL_MCP_HTTP_HOST=0.0.0.0     # default: 127.0.0.1
 MAIL_MCP_HTTP_PORT=8000        # default: 8000
 MAIL_MCP_HTTP_PATH=/mcp        # default: /mcp
 ```
+
+These are environment variables only, not TOML fields.
 
 The endpoint runs in stateless mode (no `Mcp-Session-Id`); all requests share
 one server instance, so pagination cursors and OAuth2 tokens persist across

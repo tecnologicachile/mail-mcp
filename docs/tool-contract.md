@@ -430,7 +430,9 @@ counts as unset.
 Configuration file selection:
 
 - `MAIL_CONFIG_FILE`: optional TOML path, overridden by `--config PATH`; defaults
-  to `~/.mail-mcp/config.toml` (`HOME`, or `USERPROFILE` as fallback).
+  to `~/.mail-mcp/config.toml` (`HOME`, or `USERPROFILE` as fallback). The
+  value `none` selects no file: the server uses only the process environment
+  and the legacy `.env` fallback, and config/account commands need `--config`.
 - An explicitly selected missing file is a startup error. Malformed or
   unreadable files fail rather than falling back.
 - Implicit `.env` discovery runs only without an explicit TOML path or an

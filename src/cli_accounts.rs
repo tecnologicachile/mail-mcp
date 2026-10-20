@@ -39,10 +39,6 @@ const INITIAL_CONFIG: &str = "\
 # search_concurrency = 4
 # attachment_download_dir stays unset and downloads use the system temp directory
 # attachment_upload_dir stays unset and does not restrict attachment paths
-# transport = \"stdio\"
-# http_host = \"127.0.0.1\"
-# http_port = 8000
-# http_path = \"/mcp\"
 
 [accounts]
 ";
@@ -623,7 +619,27 @@ fn prompt_security(current: Option<&str>) -> Result<String, CliFailure> {
         SECURITY_ITEMS,
         security_default_index(current),
     )?;
-    Ok(SECURITY_ITEMS[choice].to_owned())
+    let security = SECURITY_ITEMS[choice];
+    if security == "plain" {
+        warn_cleartext("SMTP");
+    }
+    Ok(security.to_owned())
+}
+
+fn prompt_imap_tls(default: bool) -> Result<bool, CliFailure> {
+    let secure = prompt_bool("IMAP TLS", default)?;
+    if !secure {
+        warn_cleartext("IMAP");
+    }
+    Ok(secure)
+}
+
+/// Printed when a cleartext mode is chosen; the prompts still allow it for a
+/// local proxy such as an OAuth2 bridge on localhost.
+fn warn_cleartext(protocol: &str) {
+    eprintln!(
+        "Warning: {protocol} without TLS sends credentials and mail in cleartext. Use it only for a local proxy on this machine."
+    );
 }
 
 /// Menu index for the provider `OAuth2Provider::parse` accepts.
@@ -830,7 +846,7 @@ fn prompt_password_account(id: String) -> Result<AccountDraft, CliFailure> {
     {
         true
     } else {
-        prompt_bool("IMAP TLS", true)?
+        prompt_imap_tls(true)?
     };
     let user = prompt_required("Email address or username", None)?;
     let smtp_user = prompt_text("SMTP username (blank uses the username above)", None, true)?;
@@ -1020,7 +1036,7 @@ pub(crate) fn prompt_edit(doc: &DocumentMut, id: &str) -> Result<AccountDraft, C
 fn prompt_edit_imap(table: &dyn TableLike, has_oauth: bool) -> Result<ImapFields, CliFailure> {
     let host = prompt_required("IMAP host", read_setting(table, "host").as_deref())?;
     let port = prompt_port("IMAP port", read_u16(table, "port").unwrap_or(993))?;
-    let secure = prompt_bool("IMAP TLS", read_bool(table, "secure").unwrap_or(true))?;
+    let secure = prompt_imap_tls(read_bool(table, "secure").unwrap_or(true))?;
     let user = prompt_required(
         "Email address or username",
         read_setting(table, "user").as_deref(),

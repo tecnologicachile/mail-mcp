@@ -40,6 +40,13 @@ not an encrypted vault. The default location is `~/.mail-mcp/config.toml`.
 Keep it out of version control, shared directories, and unprotected backups.
 The same precautions apply to files selected by `--config` or `MAIL_CONFIG_FILE`.
 
+The default file applies to every MCP client on the machine that starts
+`mail-mcp` without `--config` or `MAIL_CONFIG_FILE`: each one gets its accounts
+and its write settings (`write_enabled`, `drafts_enabled`, `smtp_write_enabled`).
+An environment-only client that must not inherit them sets
+`MAIL_CONFIG_FILE=none`. Transport settings are never read from a TOML file, so
+the file cannot switch stdio clients to HTTP.
+
 - CLI secret entry uses hidden terminal prompts; secrets are not accepted as
   command-line arguments or piped answers. A blank secret during editing keeps
   the stored value.

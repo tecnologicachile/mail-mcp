@@ -2,6 +2,7 @@
 name = "mail-mcp"
 version = "0.6.2"
 edition = "2024"
+rust-version = "1.89"
 license = "MIT"
 description = "Email MCP server for AI agents over IMAP, SMTP, Microsoft Graph and EWS"
 repository = "https://github.com/tecnologicachile/mail-mcp"

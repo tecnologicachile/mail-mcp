@@ -87,6 +87,8 @@ OAuth client uses `none` as its client secret.
 See the [TOML configuration reference](advanced-configuration.md#toml-configuration)
 for every supported field, examples, account ID rules, and path precedence.
 `--config PATH` overrides `MAIL_CONFIG_FILE`, which overrides the default path.
+`MAIL_CONFIG_FILE=none` keeps a client environment-only even when the default
+file exists.
 An existing or explicitly selected TOML file disables implicit `.env` discovery.
 Process `MAIL_*` settings still override the file; existing MCP-client `env`
 entries must be removed if the file should supply those values.

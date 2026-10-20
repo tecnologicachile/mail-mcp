@@ -619,6 +619,10 @@ binary, use `"command": "mail-mcp"`:
 
 This environment example explicitly enables read, write, and send operations.
 
+A default `~/.mail-mcp/config.toml` applies to every client that does not
+select a file, including this one. Add `"MAIL_CONFIG_FILE": "none"` to the
+`env` object to keep the client environment-only.
+
 ### Microsoft Account? Use Graph API
 
 Microsoft blocks SMTP on personal accounts. Use Graph API instead:

@@ -28,6 +28,10 @@ const MAX_ACCOUNT_ID_LEN: usize = 64;
 /// error. Save checks the serialized body before it locks or writes.
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
+/// `MAIL_CONFIG_FILE` value that selects no config file: the server runs from
+/// the process environment and the legacy `.env` fallback only.
+const NO_CONFIG_FILE: &str = "none";
+
 const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 
 /// A config file selected by `--config`, `MAIL_CONFIG_FILE`, or the default path.
@@ -98,12 +102,18 @@ impl ConfigFile {
     /// Load config for server startup.
     ///
     /// This matches [`Self::load`] with `allow_missing = false`, except when
-    /// no config path was selected and neither `HOME` nor `USERPROFILE` is
-    /// set. Startup then uses the process environment and, when the caller
-    /// asks, a legacy `.env`. No working-directory path is created.
+    /// no `--config` is given and either `MAIL_CONFIG_FILE=none` opts out of
+    /// the config file, or no config path was selected and neither `HOME` nor
+    /// `USERPROFILE` is set. Startup then uses the process environment and,
+    /// when the caller asks, a legacy `.env`. No working-directory path is
+    /// created.
     pub fn load_runtime(explicit: Option<&Path>) -> AppResult<Self> {
-        if explicit.is_none() && mail_config_file_from_env()?.is_none() && home_dir().is_none() {
-            return Ok(Self::from_environment());
+        if explicit.is_none() {
+            let mail_config_file = mail_config_file_from_env()?;
+            let opted_out = mail_config_file.as_deref() == Some(NO_CONFIG_FILE);
+            if opted_out || (mail_config_file.is_none() && home_dir().is_none()) {
+                return Ok(Self::from_environment());
+            }
         }
         Self::load(explicit, false)
     }
@@ -315,6 +325,11 @@ fn resolve_config_path(
         });
     }
     if let Some(path) = mail_config_file {
+        if path == NO_CONFIG_FILE {
+            return Err(AppError::invalid(
+                "MAIL_CONFIG_FILE=none selects no config file (pass --config to choose one)",
+            ));
+        }
         return Ok(ResolvedPath {
             path: expand_tilde(Path::new(path), home)?,
             explicit: true,
@@ -835,7 +850,7 @@ fn integer_string(
     Ok(value.to_string())
 }
 
-/// Line of `path` (`settings.http_port`, `accounts.work.imap`) in the original
+/// Line of `path` (`settings.write_enabled`, `accounts.work.imap`) in the original
 /// text. toml_edit drops spans when a document becomes editable, so this scan
 /// is what keeps errors on a line without quoting the line.
 fn line_of_path(source: &str, path: &str) -> Option<usize> {
@@ -1112,26 +1127,6 @@ const SETTINGS: &[Field] = &[
         env_suffix: "MAIL_OAUTH2_TOKEN_STORE",
         kind: ValueKind::String,
     },
-    Field {
-        name: "transport",
-        env_suffix: "MAIL_MCP_TRANSPORT",
-        kind: ValueKind::String,
-    },
-    Field {
-        name: "http_host",
-        env_suffix: "MAIL_MCP_HTTP_HOST",
-        kind: ValueKind::String,
-    },
-    Field {
-        name: "http_port",
-        env_suffix: "MAIL_MCP_HTTP_PORT",
-        kind: ValueKind::U16,
-    },
-    Field {
-        name: "http_path",
-        env_suffix: "MAIL_MCP_HTTP_PATH",
-        kind: ValueKind::String,
-    },
 ];
 
 const IMAP_FIELDS: &[Field] = &[
@@ -1379,6 +1374,11 @@ mod tests {
         assert!(resolve_config_path(None, None, None).is_err());
         assert!(resolve_config_path(Some(Path::new("~/a.toml")), None, None).is_err());
         assert!(resolve_config_path(Some(Path::new("/a.toml")), None, None).is_ok());
+
+        assert!(resolve_config_path(None, Some("none"), Some(home)).is_err());
+        let cli_over_none =
+            resolve_config_path(Some(Path::new("/cli.toml")), Some("none"), Some(home)).unwrap();
+        assert_eq!(cli_over_none.path, PathBuf::from("/cli.toml"));
     }
 
     #[test]
@@ -1482,14 +1482,14 @@ mod tests {
         assert!(message.contains("unknown key"));
         assert!(!message.contains("caldav"));
 
-        let text = "[settings]\nhttp_port = 65536\n";
+        let text = "[accounts.work.imap]\nport = 65536\n";
         let message = shown(
             &parsed(text)
                 .resolve_from(Settings::new(), no_env())
                 .unwrap_err(),
         );
         assert!(message.contains("0 to 65535"));
-        assert!(!message.contains("http_port"));
+        assert!(!message.contains("accounts.work.imap.port"));
         assert!(!message.contains("65536"));
 
         let text = "[settings]\nwrite_enabled = \"false\"\n";
@@ -1531,12 +1531,12 @@ mod tests {
                 .is_ok()
         );
         assert!(
-            parsed("[settings]\nhttp_port = 0\n")
+            parsed("[accounts.work.imap]\nport = 0\n")
                 .resolve_from(Settings::new(), no_env())
                 .is_ok()
         );
         assert!(
-            parsed("[settings]\nhttp_port = 65535\n")
+            parsed("[accounts.work.imap]\nport = 65535\n")
                 .resolve_from(Settings::new(), no_env())
                 .is_ok()
         );
@@ -1545,6 +1545,24 @@ mod tests {
                 .resolve_from(Settings::new(), no_env())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn transport_settings_are_not_read_from_a_file() {
+        for key in [
+            "transport = \"http\"",
+            "http_host = \"0.0.0.0\"",
+            "http_port = 9000",
+            "http_path = \"/mcp\"",
+        ] {
+            let text = format!("[settings]\n{key}\n");
+            let message = shown(
+                &parsed(&text)
+                    .resolve_from(Settings::new(), no_env())
+                    .unwrap_err(),
+            );
+            assert!(message.contains("unknown key"), "{key}");
+        }
     }
 
     #[test]
