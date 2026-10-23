@@ -11,7 +11,10 @@ use base64::Engine;
 use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{ErrorData, Implementation, ServerCapabilities, ServerInfo};
+// rmcp 2.x deprecated the ServerInfo alias in favor of ServerConfig; this
+// crate also has its own config::ServerConfig (mail accounts), so import
+// rmcp's under an alias.
+use rmcp::model::{ErrorData, Implementation, ServerCapabilities, ServerConfig as McpServerConfig};
 use rmcp::{Json, ServerHandler, tool, tool_handler, tool_router};
 use tokio::sync::Mutex;
 use tracing::{error, warn};
@@ -1062,19 +1065,20 @@ impl MailImapServer {
 /// Provides server info and capabilities to MCP client.
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for MailImapServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            // Identify ourselves explicitly so /mcp output and any cache
-            // keyed on (server name, version) sees a fresh value when this
-            // crate bumps. Without this, the framework defaults to its own
-            // name/version (rmcp 0.16.0), which never changes between our
-            // releases.
-            server_info: Implementation {
-                name: env!("CARGO_PKG_NAME").to_owned(),
-                version: env!("CARGO_PKG_VERSION").to_owned(),
-                ..Default::default()
-            },
-            instructions: Some(concat!(
+    fn get_info(&self) -> McpServerConfig {
+        // Identify ourselves explicitly so /mcp output and any cache
+        // keyed on (server name, version) sees a fresh value when this
+        // crate bumps. Without this, the framework defaults to its own
+        // name/version (rmcp 0.16.0), which never changes between our
+        // releases. rmcp 2.x deprecated the ServerInfo alias for ServerConfig and made
+        // non_exhaustive, so build from Default and assign fields.
+        let mut implementation = Implementation::default();
+        implementation.name = env!("CARGO_PKG_NAME").to_owned();
+        implementation.version = env!("CARGO_PKG_VERSION").to_owned();
+
+        let mut info = McpServerConfig::default();
+        info.server_info = implementation;
+        info.instructions = Some(concat!(
                 // ── HARD RULES at the top — most likely to survive any
                 //    truncation, attention drift, or partial reads of the
                 //    server instructions block.
@@ -1116,10 +1120,9 @@ impl ServerHandler for MailImapServer {
                 "Write: MAIL_IMAP_WRITE_ENABLED=true. Send: MAIL_SMTP_WRITE_ENABLED=true.\n",
                 "For OAuth2/Microsoft setup, call get_setup_guide tool.\n\n",
                 "Star the project: https://github.com/tecnologicachile/mail-mcp",
-            ).to_owned() + self.update_notice.as_deref().unwrap_or("")),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+            ).to_owned() + self.update_notice.as_deref().unwrap_or(""));
+        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info
     }
 }
 

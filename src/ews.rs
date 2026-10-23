@@ -571,6 +571,7 @@ fn escape_xml(text: &str) -> String {
 // `extract_*` helpers.
 
 use quick_xml::Reader;
+use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
 
 /// Return the (unescaped) text content of the first element whose local
@@ -579,10 +580,8 @@ use quick_xml::events::{BytesStart, Event};
 fn extract_xml_text(xml: &str, tag: &str) -> Option<String> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
-    let mut buf = Vec::new();
     loop {
-        buf.clear();
-        match reader.read_event_into(&mut buf) {
+        match reader.read_event() {
             Ok(Event::Start(e)) if local_name_eq(&e, tag) => {
                 return Some(read_text_until_end(&mut reader));
             }
@@ -599,10 +598,8 @@ fn extract_xml_text(xml: &str, tag: &str) -> Option<String> {
 fn extract_attr(xml: &str, tag: &str, attr: &str) -> Option<String> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
-    let mut buf = Vec::new();
     loop {
-        buf.clear();
-        match reader.read_event_into(&mut buf) {
+        match reader.read_event() {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) if local_name_eq(&e, tag) => {
                 return attr_value(&e, attr);
             }
@@ -634,13 +631,11 @@ fn parse_draft_state(xml: &str) -> Option<EwsDraftState> {
 fn parse_draft_summaries(xml: &str) -> AppResult<Vec<EwsDraftSummary>> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
-    let mut buf = Vec::new();
     let mut drafts = Vec::new();
     let mut current: Option<EwsDraftSummary> = None;
 
     loop {
-        buf.clear();
-        match reader.read_event_into(&mut buf) {
+        match reader.read_event() {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match local_name(&e).as_str() {
                 "Message" => {
                     current = Some(EwsDraftSummary {
@@ -705,12 +700,10 @@ fn parse_draft_summaries(xml: &str) -> AppResult<Vec<EwsDraftSummary>> {
 fn parse_find_items_response(xml: &str) -> AppResult<Vec<EwsMessage>> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
-    let mut buf = Vec::new();
     let mut messages = Vec::new();
 
     loop {
-        buf.clear();
-        match reader.read_event_into(&mut buf) {
+        match reader.read_event() {
             Ok(Event::Start(e)) if local_name_eq(&e, "Message") => {
                 messages.push(parse_message_block(&mut reader)?);
             }
@@ -742,11 +735,9 @@ fn parse_get_item_response(xml: &str) -> AppResult<EwsMessageDetail> {
 
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
-    let mut buf = Vec::new();
 
     loop {
-        buf.clear();
-        match reader.read_event_into(&mut buf) {
+        match reader.read_event() {
             Ok(Event::Start(e)) if local_name_eq(&e, "Message") => {
                 return parse_message_detail_block(&mut reader);
             }
@@ -780,7 +771,6 @@ fn parse_get_item_response(xml: &str) -> AppResult<EwsMessageDetail> {
 /// After a `Start(<t:Message>)` event, extract all fields for a single
 /// `EwsMessageDetail` by reading child elements until the matching End.
 fn parse_message_detail_block(reader: &mut Reader<&[u8]>) -> AppResult<EwsMessageDetail> {
-    let mut buf = Vec::new();
     let mut detail = EwsMessageDetail {
         item_id: String::new(),
         subject: String::new(),
@@ -797,8 +787,7 @@ fn parse_message_detail_block(reader: &mut Reader<&[u8]>) -> AppResult<EwsMessag
     let mut captured_from_email = false;
 
     loop {
-        buf.clear();
-        match reader.read_event_into(&mut buf) {
+        match reader.read_event() {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match local_name(&e).as_str() {
                 "ItemId" => {
                     if detail.item_id.is_empty() {
@@ -860,41 +849,29 @@ fn local_name_eq(e: &BytesStart<'_>, name: &str) -> bool {
 
 /// `true` if a raw qualified-name byte slice (e.g. `b"t:Subject"`)
 /// has a local part equal to `name`.
-fn local_name_bytes_eq(qname: &[u8], name: &str) -> bool {
-    let local = match qname.iter().position(|&b| b == b':') {
-        Some(i) => &qname[i + 1..],
-        None => qname,
-    };
-    local == name.as_bytes()
+fn local_name_bytes_eq(qname: &str, name: &str) -> bool {
+    qname.rsplit(':').next().unwrap_or(qname) == name
 }
 
 /// Extract the local name of a `Start`/`Empty` element (strips any
 /// `prefix:` namespace).
 fn local_name(e: &BytesStart<'_>) -> String {
     let qname = e.name();
-    let bytes = qname.as_ref();
-    let local = match bytes.iter().position(|&b| b == b':') {
-        Some(i) => &bytes[i + 1..],
-        None => bytes,
-    };
-    String::from_utf8_lossy(local).into_owned()
+    let name: &str = qname.as_ref();
+    name.rsplit(':').next().unwrap_or(name).to_owned()
 }
 
 /// Read the first attribute of `e` matching `attr_name` (local name match).
 /// Returns the unescaped value.
 fn attr_value(e: &BytesStart<'_>, attr_name: &str) -> Option<String> {
     for raw in e.attributes().flatten() {
-        let key = raw.key;
-        let key_bytes = key.as_ref();
-        let local = match key_bytes.iter().position(|&b| b == b':') {
-            Some(i) => &key_bytes[i + 1..],
-            None => key_bytes,
-        };
-        if local == attr_name.as_bytes() {
+        let key: &str = raw.key.as_ref();
+        let local = key.rsplit(':').next().unwrap_or(key);
+        if local == attr_name {
             return Some(
-                raw.unescape_value()
+                raw.normalized_value(XmlVersion::Implicit1_0)
                     .map(|c| c.into_owned())
-                    .unwrap_or_else(|_| String::from_utf8_lossy(raw.value.as_ref()).into_owned()),
+                    .unwrap_or_else(|_| raw.value.as_ref().to_owned()),
             );
         }
     }
@@ -907,12 +884,10 @@ fn attr_value(e: &BytesStart<'_>, attr_name: &str) -> Option<String> {
 /// whatever we collected so far rather than erroring (lossy but forward-
 /// compatible with the previous substring-based helpers).
 fn read_text_until_end(reader: &mut Reader<&[u8]>) -> String {
-    let mut buf = Vec::new();
     let mut text = String::new();
     let mut depth = 1;
     loop {
-        buf.clear();
-        match reader.read_event_into(&mut buf) {
+        match reader.read_event() {
             Ok(Event::Start(_)) => depth += 1,
             Ok(Event::End(_)) => {
                 depth -= 1;
@@ -921,12 +896,26 @@ fn read_text_until_end(reader: &mut Reader<&[u8]>) -> String {
                 }
             }
             Ok(Event::Text(t)) => {
-                if let Ok(s) = t.unescape() {
-                    text.push_str(&s);
+                text.push_str(t.as_ref());
+            }
+            // quick-xml 0.42 emits entity references as separate GeneralRef
+            // events; resolve the predefined entities and numeric character
+            // references, keep unknown entities verbatim (forward-compatible).
+            Ok(Event::GeneralRef(r)) => {
+                if let Some(ch) = r.resolve_char_ref().ok().flatten() {
+                    text.push(ch);
+                } else if let Some(predef) =
+                    quick_xml::escape::resolve_predefined_entity(r.as_ref())
+                {
+                    text.push_str(predef);
+                } else {
+                    text.push('&');
+                    text.push_str(r.as_ref());
+                    text.push(';');
                 }
             }
             Ok(Event::CData(t)) => {
-                text.push_str(&String::from_utf8_lossy(t.as_ref()));
+                text.push_str(t.as_ref());
             }
             Ok(Event::Eof) | Err(_) => return text,
             _ => {}
@@ -937,7 +926,6 @@ fn read_text_until_end(reader: &mut Reader<&[u8]>) -> String {
 /// After a `Start(Message)` event, accumulate one `EwsMessage` by reading
 /// child elements until the matching `End(Message)`.
 fn parse_message_block(reader: &mut Reader<&[u8]>) -> AppResult<EwsMessage> {
-    let mut buf = Vec::new();
     let mut msg = EwsMessage {
         item_id: String::new(),
         change_key: String::new(),
@@ -950,8 +938,7 @@ fn parse_message_block(reader: &mut Reader<&[u8]>) -> AppResult<EwsMessage> {
     let mut captured_name = false;
     let mut captured_email = false;
     loop {
-        buf.clear();
-        match reader.read_event_into(&mut buf) {
+        match reader.read_event() {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match local_name(&e).as_str() {
                 "ItemId" => {
                     msg.item_id = attr_value(&e, "Id").unwrap_or_default();
@@ -994,14 +981,12 @@ fn parse_message_block(reader: &mut Reader<&[u8]>) -> AppResult<EwsMessage> {
 /// Inside a `ToRecipients` / `CcRecipients` Start event, collect all
 /// child `<EmailAddress>` text values and join them with ", ".
 fn collect_recipient_emails(reader: &mut Reader<&[u8]>) -> AppResult<String> {
-    let mut buf = Vec::new();
     let mut emails = Vec::new();
     // We're positioned right AFTER a Start("ToRecipients") / ("CcRecipients")
     // event, so depth starts at 1. Track depth to know when we exit.
     let mut depth = 1i32;
     loop {
-        buf.clear();
-        match reader.read_event_into(&mut buf) {
+        match reader.read_event() {
             Ok(Event::Start(e)) => {
                 if local_name_eq(&e, "EmailAddress") {
                     emails.push(read_text_until_end(reader));

@@ -112,10 +112,14 @@ pub async fn serve(server: MailImapServer, settings: HttpSettings) -> Result<(),
     let service = StreamableHttpService::new(
         move || Ok(server.clone()),
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig {
-            stateful_mode: false,
-            cancellation_token: shutdown.clone(),
-            ..Default::default()
+        {
+            // rmcp 2.x renamed stateful_mode -> legacy_session_mode and made
+            // the config non_exhaustive; false keeps the original stateless
+            // behavior (every request independent).
+            let mut config = StreamableHttpServerConfig::default();
+            config.legacy_session_mode = false;
+            config.cancellation_token = shutdown.clone();
+            config
         },
     );
     let router = axum::Router::new().route_service(&settings.path, service);
