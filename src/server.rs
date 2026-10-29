@@ -3,6 +3,7 @@
 //! Implements the `ServerHandler` trait and registers 19 MCP tools. Handles
 //! input validation, business logic orchestration, and response formatting.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -4215,9 +4216,30 @@ async fn build_message_summaries(
     let mut issues = Vec::new();
     let mut failed = 0usize;
 
+    // One UID FETCH for the whole page. A UID the batch did not answer for,
+    // or a batch the server rejected, falls back to the per-message fetch so
+    // errors stay per UID; a timed-out batch fails the page instead of
+    // waiting out the timeout once more for every UID.
+    let (mut batched, batch_timeout) =
+        match imap::fetch_headers_and_flags_many(config, session, uids).await {
+            Ok(fetched) => (
+                fetched
+                    .into_iter()
+                    .map(|(uid, header_bytes, flags)| (uid, (header_bytes, flags)))
+                    .collect::<HashMap<_, _>>(),
+                None,
+            ),
+            Err(AppError::Timeout(message)) => (HashMap::new(), Some(message)),
+            Err(_) => (HashMap::new(), None),
+        };
+
     for uid in uids {
-        let (header_bytes, flags) = match imap::fetch_headers_and_flags(config, session, *uid).await
-        {
+        let fetched = match (batched.remove(uid), &batch_timeout) {
+            (Some(fetched), _) => Ok(fetched),
+            (None, Some(message)) => Err(AppError::Timeout(message.clone())),
+            (None, None) => imap::fetch_headers_and_flags(config, session, *uid).await,
+        };
+        let (header_bytes, flags) = match fetched {
             Ok(result) => result,
             Err(error) => {
                 failed += 1;
