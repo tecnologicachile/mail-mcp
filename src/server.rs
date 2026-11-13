@@ -126,7 +126,13 @@ impl MailImapServer {
     /// so the LLM knows which send/read tool to use for each account.
     #[tool(
         name = "list_all_accounts",
-        description = "List all configured email accounts with their capabilities (IMAP, SMTP, Graph API, EWS). Use this to know which send/read tools to use per account."
+        description = "List all configured email accounts with their capabilities (IMAP, SMTP, Graph API, EWS). Use this to know which send/read tools to use per account.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn list_all_accounts(&self) -> Result<Json<ToolEnvelope<serde_json::Value>>, ErrorData> {
         let started = Instant::now();
@@ -215,7 +221,13 @@ impl MailImapServer {
     /// Tool: List configured IMAP accounts (legacy, use list_all_accounts instead)
     #[tool(
         name = "imap_list_accounts",
-        description = "List configured IMAP accounts (use list_all_accounts for full capabilities view)"
+        description = "List configured IMAP accounts (use list_all_accounts for full capabilities view)",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn list_accounts(&self) -> Result<Json<ToolEnvelope<serde_json::Value>>, ErrorData> {
         let started = Instant::now();
@@ -244,7 +256,13 @@ impl MailImapServer {
     /// capabilities list.
     #[tool(
         name = "imap_verify_account",
-        description = "Verify account connectivity and capabilities"
+        description = "Verify account connectivity and capabilities",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn verify_account(
         &self,
@@ -267,7 +285,13 @@ impl MailImapServer {
     /// when the list is incomplete.
     #[tool(
         name = "imap_list_mailboxes",
-        description = "List mailboxes for an account"
+        description = "List mailboxes for an account",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn list_mailboxes(
         &self,
@@ -296,7 +320,13 @@ impl MailImapServer {
     /// across large result sets.
     #[tool(
         name = "imap_search_messages",
-        description = "Search messages with cursor pagination"
+        description = "Search messages with cursor pagination",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn search_messages(
         &self,
@@ -320,7 +350,13 @@ impl MailImapServer {
     /// spread over INBOX, Sent and project folders.
     #[tool(
         name = "imap_search_all_mailboxes",
-        description = "Search every mailbox of an account in one call (e.g. a whole conversation via thread_message_id); results are newest first and labelled with their mailbox"
+        description = "Search every mailbox of an account in one call (e.g. a whole conversation via thread_message_id); results are newest first and labelled with their mailbox",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn search_all_mailboxes(
         &self,
@@ -347,7 +383,16 @@ impl MailImapServer {
     ///
     /// Returns structured message data with headers, body text/HTML, and
     /// attachments. Supports bounded enrichment (char limits, optional HTML).
-    #[tool(name = "imap_get_message", description = "Get parsed message details")]
+    #[tool(
+        name = "imap_get_message",
+        description = "Get parsed message details",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
     async fn get_message(
         &self,
         Parameters(input): Parameters<GetMessageInput>,
@@ -368,7 +413,13 @@ impl MailImapServer {
     /// diagnostics or tools that need full message source.
     #[tool(
         name = "imap_get_message_raw",
-        description = "Get bounded RFC822 source"
+        description = "Get bounded RFC822 source",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn get_message_raw(
         &self,
@@ -391,7 +442,13 @@ impl MailImapServer {
     /// size cap and keeps large binaries out of the response.
     #[tool(
         name = "imap_get_attachment",
-        description = "Download one attachment to disk"
+        description = "Download one attachment to disk",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn get_attachment(
         &self,
@@ -413,7 +470,13 @@ impl MailImapServer {
     /// custom flags). Requires `MAIL_IMAP_WRITE_ENABLED=true`.
     #[tool(
         name = "imap_update_message_flags",
-        description = "Add or remove IMAP flags"
+        description = "Add or remove IMAP flags",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn update_message_flags(
         &self,
@@ -433,7 +496,16 @@ impl MailImapServer {
     ///
     /// Copies message to same or different account. Cross-account copy uses
     /// `APPEND`. Requires `MAIL_IMAP_WRITE_ENABLED=true`.
-    #[tool(name = "imap_copy_message", description = "Copy a message to mailbox")]
+    #[tool(
+        name = "imap_copy_message",
+        description = "Copy a message to mailbox",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
     async fn copy_message(
         &self,
         Parameters(input): Parameters<CopyMessageInput>,
@@ -453,7 +525,16 @@ impl MailImapServer {
     /// Moves message within same account. Prefers `MOVE` capability,
     /// falls back to `COPY` + `DELETE`. Requires
     /// `MAIL_IMAP_WRITE_ENABLED=true`.
-    #[tool(name = "imap_move_message", description = "Move a message to mailbox")]
+    #[tool(
+        name = "imap_move_message",
+        description = "Move a message to mailbox",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
     async fn move_message(
         &self,
         Parameters(input): Parameters<MoveMessageInput>,
@@ -472,7 +553,16 @@ impl MailImapServer {
     ///
     /// Marks message as `\Deleted` and immediately expunges. Requires
     /// explicit `confirm=true` and `MAIL_IMAP_WRITE_ENABLED=true`.
-    #[tool(name = "imap_delete_message", description = "Delete a message")]
+    #[tool(
+        name = "imap_delete_message",
+        description = "Delete a message",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
     async fn delete_message(
         &self,
         Parameters(input): Parameters<DeleteMessageInput>,
@@ -492,7 +582,13 @@ impl MailImapServer {
     /// Creates a mailbox. Requires `MAIL_IMAP_WRITE_ENABLED=true`.
     #[tool(
         name = "imap_create_mailbox",
-        description = "Create a new mailbox/folder"
+        description = "Create a new mailbox/folder",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     async fn create_mailbox(
         &self,
@@ -512,7 +608,16 @@ impl MailImapServer {
     ///
     /// Deletes a mailbox. Requires explicit `confirm=true` and
     /// `MAIL_IMAP_WRITE_ENABLED=true`.
-    #[tool(name = "imap_delete_mailbox", description = "Delete a mailbox/folder")]
+    #[tool(
+        name = "imap_delete_mailbox",
+        description = "Delete a mailbox/folder",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
     async fn delete_mailbox(
         &self,
         Parameters(input): Parameters<DeleteMailboxInput>,
@@ -530,7 +635,16 @@ impl MailImapServer {
     /// Tool: Rename a mailbox/folder
     ///
     /// Renames a mailbox. Requires `MAIL_IMAP_WRITE_ENABLED=true`.
-    #[tool(name = "imap_rename_mailbox", description = "Rename a mailbox/folder")]
+    #[tool(
+        name = "imap_rename_mailbox",
+        description = "Rename a mailbox/folder",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
     async fn rename_mailbox(
         &self,
         Parameters(input): Parameters<RenameMailboxInput>,
@@ -550,7 +664,13 @@ impl MailImapServer {
     /// Returns message, unseen, and recent counts without selecting the mailbox.
     #[tool(
         name = "imap_mailbox_status",
-        description = "Get mailbox message counts (total, unseen, recent) without selecting it"
+        description = "Get mailbox message counts (total, unseen, recent) without selecting it",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn mailbox_status(
         &self,
@@ -572,7 +692,13 @@ impl MailImapServer {
     /// mailbox. Requires `MAIL_IMAP_WRITE_ENABLED=true`.
     #[tool(
         name = "imap_bulk_move",
-        description = "Move up to 500 messages to a mailbox in one operation"
+        description = "Move up to 500 messages to a mailbox in one operation",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     async fn bulk_move(
         &self,
@@ -592,7 +718,13 @@ impl MailImapServer {
     /// mailbox. Requires explicit `confirm=true` and `MAIL_IMAP_WRITE_ENABLED=true`.
     #[tool(
         name = "imap_bulk_delete",
-        description = "Delete up to 500 messages in one operation"
+        description = "Delete up to 500 messages in one operation",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn bulk_delete(
         &self,
@@ -612,7 +744,13 @@ impl MailImapServer {
     /// the same mailbox. Requires `MAIL_IMAP_WRITE_ENABLED=true`.
     #[tool(
         name = "imap_bulk_update_flags",
-        description = "Update flags on up to 500 messages in one operation"
+        description = "Update flags on up to 500 messages in one operation",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn bulk_update_flags(
         &self,
@@ -632,7 +770,13 @@ impl MailImapServer {
     /// `MAIL_IMAP_WRITE_ENABLED=true`.
     #[tool(
         name = "imap_append_message",
-        description = "Append a raw RFC822 message to a mailbox"
+        description = "Append a raw RFC822 message to a mailbox",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     async fn append_message(
         &self,
@@ -655,7 +799,13 @@ impl MailImapServer {
     /// Requires `MAIL_IMAP_WRITE_ENABLED=true`.
     #[tool(
         name = "imap_search_and_move",
-        description = "Search messages and move matches to a mailbox in one operation (up to 500)"
+        description = "Search messages and move matches to a mailbox in one operation (up to 500)",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     async fn search_and_move(
         &self,
@@ -678,7 +828,13 @@ impl MailImapServer {
     /// Requires `MAIL_IMAP_WRITE_ENABLED=true` and `confirm=true`.
     #[tool(
         name = "imap_search_and_delete",
-        description = "Search messages and delete matches in one operation (up to 500)"
+        description = "Search messages and delete matches in one operation (up to 500)",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn search_and_delete(
         &self,
@@ -699,7 +855,13 @@ impl MailImapServer {
     /// Tool: Send a new email via SMTP
     #[tool(
         name = "smtp_send_message",
-        description = "Send a new email via SMTP. Before calling, show the user a full preview (To, CC, BCC, subject, rendered body, attachments) and get explicit confirmation."
+        description = "Send a new email via SMTP. Before calling, show the user a full preview (To, CC, BCC, subject, rendered body, attachments) and get explicit confirmation.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     async fn smtp_send_message(
         &self,
@@ -713,7 +875,13 @@ impl MailImapServer {
     /// Tool: Reply to a message via SMTP
     #[tool(
         name = "smtp_reply_message",
-        description = "Reply to an existing message via SMTP (fetches original for proper threading). Before calling, show the user a full preview (To, CC, BCC, subject, rendered body, attachments) and get explicit confirmation."
+        description = "Reply to an existing message via SMTP (fetches original for proper threading). Before calling, show the user a full preview (To, CC, BCC, subject, rendered body, attachments) and get explicit confirmation.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     async fn smtp_reply_message(
         &self,
@@ -727,7 +895,13 @@ impl MailImapServer {
     /// Tool: Forward a message via SMTP
     #[tool(
         name = "smtp_forward_message",
-        description = "Forward an existing message via SMTP. Before calling, show the user a full preview (To, CC, BCC, subject, rendered body, attachments) and get explicit confirmation."
+        description = "Forward an existing message via SMTP. Before calling, show the user a full preview (To, CC, BCC, subject, rendered body, attachments) and get explicit confirmation.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     async fn smtp_forward_message(
         &self,
@@ -741,7 +915,13 @@ impl MailImapServer {
     /// Tool: Verify SMTP connectivity
     #[tool(
         name = "smtp_verify_account",
-        description = "Test SMTP account connectivity and authentication"
+        description = "Test SMTP account connectivity and authentication",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn smtp_verify_account(
         &self,
@@ -757,7 +937,13 @@ impl MailImapServer {
     /// Tool: Send email via Microsoft Graph API
     #[tool(
         name = "graph_send_message",
-        description = "Send email via Microsoft Graph API (required for personal hotmail/outlook.com accounts where SMTP is blocked). Before calling, show the user a full preview (To, CC, BCC, subject, rendered body, attachments) and get explicit confirmation."
+        description = "Send email via Microsoft Graph API (required for personal hotmail/outlook.com accounts where SMTP is blocked). Before calling, show the user a full preview (To, CC, BCC, subject, rendered body, attachments) and get explicit confirmation.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     async fn graph_send_message(
         &self,
@@ -773,7 +959,13 @@ impl MailImapServer {
     /// Tool: Search emails via EWS (Exchange Web Services)
     #[tool(
         name = "ews_search_messages",
-        description = "Search emails via Exchange Web Services. Preferred for Microsoft accounts. Supports inbox, sent, drafts, deleted, junk folders."
+        description = "Search emails via Exchange Web Services. Preferred for Microsoft accounts. Supports inbox, sent, drafts, deleted, junk folders.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn ews_search_messages(
         &self,
@@ -807,7 +999,13 @@ impl MailImapServer {
     /// Tool: Get email details via EWS
     #[tool(
         name = "ews_get_message",
-        description = "Get full email content via Exchange Web Services using an EWS item ID."
+        description = "Get full email content via Exchange Web Services using an EWS item ID.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn ews_get_message(
         &self,
@@ -831,7 +1029,13 @@ impl MailImapServer {
     /// Tool: Send email via EWS
     #[tool(
         name = "ews_send_message",
-        description = "Send email via Exchange Web Services. Works on Microsoft tenants that block SMTP and Graph API. Before calling, show the user a full preview (To, CC, BCC, subject, rendered body, attachments) and get explicit confirmation."
+        description = "Send email via Exchange Web Services. Works on Microsoft tenants that block SMTP and Graph API. Before calling, show the user a full preview (To, CC, BCC, subject, rendered body, attachments) and get explicit confirmation.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     async fn ews_send_message(
         &self,
@@ -903,7 +1107,13 @@ impl MailImapServer {
     /// Tool: Create a draft
     #[tool(
         name = "draft_create",
-        description = "Save a new email as a draft in the account's Drafts folder (IMAP, EWS or Graph, chosen from the account's configuration). Nothing is sent. Requires MAIL_DRAFTS_ENABLED=true."
+        description = "Save a new email as a draft in the account's Drafts folder (IMAP, EWS or Graph, chosen from the account's configuration). Nothing is sent. Requires MAIL_DRAFTS_ENABLED=true.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     async fn draft_create(
         &self,
@@ -917,7 +1127,13 @@ impl MailImapServer {
     /// Tool: Replace a draft's content
     #[tool(
         name = "draft_update",
-        description = "Replace a draft's recipients, subject, body and attachments (full replacement). Returns a new draft_id; the old one stops working. Requires MAIL_DRAFTS_ENABLED=true."
+        description = "Replace a draft's recipients, subject, body and attachments (full replacement). Returns a new draft_id; the old one stops working. Requires MAIL_DRAFTS_ENABLED=true.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     async fn draft_update(
         &self,
@@ -931,7 +1147,13 @@ impl MailImapServer {
     /// Tool: Send a draft
     #[tool(
         name = "draft_send",
-        description = "Send an existing draft and remove it from Drafts. Requires MAIL_DRAFTS_ENABLED=true and MAIL_SMTP_WRITE_ENABLED=true. Before calling, show the user the draft's recipients, subject and body and get explicit confirmation."
+        description = "Send an existing draft and remove it from Drafts. Requires MAIL_DRAFTS_ENABLED=true and MAIL_SMTP_WRITE_ENABLED=true. Before calling, show the user the draft's recipients, subject and body and get explicit confirmation.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     async fn draft_send(
         &self,
@@ -945,7 +1167,13 @@ impl MailImapServer {
     /// Tool: Delete a draft
     #[tool(
         name = "draft_delete",
-        description = "Delete a draft. Only acts on drafts. Requires MAIL_DRAFTS_ENABLED=true and confirm=true."
+        description = "Delete a draft. Only acts on drafts. Requires MAIL_DRAFTS_ENABLED=true and confirm=true.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn draft_delete(
         &self,
@@ -959,7 +1187,13 @@ impl MailImapServer {
     /// Tool: List drafts
     #[tool(
         name = "draft_list",
-        description = "List the account's drafts, newest first, with their draft_id. Requires MAIL_DRAFTS_ENABLED=true."
+        description = "List the account's drafts, newest first, with their draft_id. Requires MAIL_DRAFTS_ENABLED=true.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn draft_list(
         &self,
@@ -975,7 +1209,13 @@ impl MailImapServer {
     /// Tool: Get provider setup guide (OAuth2, App Passwords, configuration)
     #[tool(
         name = "get_setup_guide",
-        description = "Get detailed setup instructions for email providers (Microsoft OAuth2, Gmail, Zoho, etc.)"
+        description = "Get detailed setup instructions for email providers (Microsoft OAuth2, Gmail, Zoho, etc.)",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn get_setup_guide(&self) -> Result<Json<ToolEnvelope<serde_json::Value>>, ErrorData> {
         let started = Instant::now();
@@ -5425,5 +5665,39 @@ mod tests {
             messages.iter().map(|m| m.uid).collect::<Vec<_>>(),
             vec![3, 4, 1, 2]
         );
+    }
+
+    /// Every tool must declare all four hints explicitly so clients never
+    /// fall back on the spec defaults, and read-only tools must not claim to
+    /// be destructive or non-idempotent. Guards against new tools landing
+    /// without annotations.
+    #[test]
+    fn every_tool_declares_annotations() {
+        let tools = super::MailImapServer::tool_router().list_all();
+        assert!(!tools.is_empty());
+        for tool in tools {
+            let ann = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("tool {} has no annotations", tool.name));
+            let read_only = ann
+                .read_only_hint
+                .unwrap_or_else(|| panic!("tool {} has no read_only_hint", tool.name));
+            let destructive = ann
+                .destructive_hint
+                .unwrap_or_else(|| panic!("tool {} has no destructive_hint", tool.name));
+            let idempotent = ann
+                .idempotent_hint
+                .unwrap_or_else(|| panic!("tool {} has no idempotent_hint", tool.name));
+            if read_only {
+                assert!(!destructive, "read-only tool {} is destructive", tool.name);
+                assert!(idempotent, "read-only tool {} is not idempotent", tool.name);
+            }
+            assert!(
+                ann.open_world_hint.is_some(),
+                "tool {} has no open_world_hint",
+                tool.name
+            );
+        }
     }
 }
