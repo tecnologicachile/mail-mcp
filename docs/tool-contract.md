@@ -9,6 +9,7 @@ It is the source of truth for tool names, input/output shapes, validation bounds
 - Auth/config: environment variables only.
 - Message locator: stable `message_id` format `imap:{account_id}:{mailbox}:{uidvalidity}:{uid}`.
 - Destructive/write operations: disabled by default and explicitly gated.
+- Tool annotations: every tool declares `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint`; a test fails if a tool is missing one, or if a read-only tool claims to be destructive or non-idempotent.
 - Output style: concise summaries with bounded structured data.
 - Compatibility: no backward compatibility requirement with earlier implementations.
 

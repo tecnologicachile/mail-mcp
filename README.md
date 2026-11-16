@@ -15,6 +15,21 @@
 
 Most email MCP servers only do IMAP reads. This one does **everything**: read, search, send, reply, forward, bulk operations, Microsoft Graph API, and Exchange Web Services — with real OAuth2, multi-account, and multi-provider support. Written in Rust for speed and safety.
 
+## What's New in v0.6.2
+
+- **Faster searches.** `imap_search_messages` and `imap_search_all_mailboxes`
+  now fetch the headers of a whole result page with one `UID FETCH` instead
+  of one per message. On high-latency servers a 50-message page went from
+  20-40 s to 3-9 s, and searching every mailbox is about twice as fast.
+  Results are unchanged.
+  ([#44](https://github.com/tecnologicachile/mail-mcp/pull/44), by tdabasinskas)
+- **MCP tool annotations.** Every tool now declares `readOnlyHint`,
+  `destructiveHint`, `idempotentHint` and `openWorldHint`. Clients that use
+  them can run the 14 read-only tools without asking each time. Sends,
+  moves and other changes are marked as writes, and deletes, flag changes,
+  `draft_update` and `draft_send` as destructive.
+  ([#43](https://github.com/tecnologicachile/mail-mcp/pull/43), by tdabasinskas)
+
 ## What's New in v0.6.1
 
 - **Message content stays out of the logs at `RUST_LOG=info`.** At that
