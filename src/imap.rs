@@ -617,6 +617,50 @@ pub async fn fetch_headers_and_flags(
     Ok((header_bytes, flags_to_strings(&fetch)))
 }
 
+/// Fetch curated headers and flags for several messages in one `UID FETCH`
+///
+/// Same items as [`fetch_headers_and_flags`], but one round trip for the
+/// whole set instead of one per message. Returns `(uid, headers, flags)` in
+/// the order the server sent them; a UID the server did not answer for (for
+/// example, expunged in the meantime) is simply absent from the result.
+pub async fn fetch_headers_and_flags_many(
+    server: &ServerConfig,
+    session: &mut ImapSession,
+    uids: &[u32],
+) -> AppResult<Vec<(u32, Vec<u8>, Vec<String>)>> {
+    if uids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let uid_set = uids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let stream = timeout(
+        socket_timeout(server),
+        session.uid_fetch(
+            uid_set,
+            "(UID FLAGS BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC SUBJECT)])",
+        ),
+    )
+    .await
+    .map_err(|_| AppError::Timeout("UID FETCH timed out".to_owned()))
+    .and_then(|r| r.map_err(|e| AppError::Internal(format!("uid fetch failed: {e}"))))?;
+    let fetches: Vec<Fetch> = timeout(socket_timeout(server), stream.try_collect())
+        .await
+        .map_err(|_| AppError::Timeout("UID FETCH stream timed out".to_owned()))
+        .and_then(|r| r.map_err(|e| AppError::Internal(format!("uid fetch stream failed: {e}"))))?;
+
+    Ok(fetches
+        .iter()
+        .filter_map(|fetch| {
+            let uid = fetch.uid?;
+            let headers = fetch.header().or_else(|| fetch.body())?.to_vec();
+            Some((uid, headers, flags_to_strings(fetch)))
+        })
+        .collect())
+}
+
 /// Fetch message flags only
 ///
 /// Returns IMAP flags (e.g., `\Seen`, `\Flagged`, `\Draft`) as strings.
@@ -957,11 +1001,11 @@ mod tests {
     use tokio_rustls::TlsConnector;
 
     use super::{
-        MailboxRole, append, fetch_flags, fetch_raw_message, is_drafts_folder_name,
-        is_junk_folder_name, is_sent_folder_name, is_trash_folder_name, list_all_mailboxes,
-        mailbox_role_for_alias, noop, normalize_append_flags, resolve_mailbox_among,
-        select_mailbox_readonly, select_mailbox_readwrite, socket_timeout, uid_copy, uid_expunge,
-        uid_move, uid_search, uid_store,
+        MailboxRole, append, fetch_flags, fetch_headers_and_flags_many, fetch_raw_message,
+        is_drafts_folder_name, is_junk_folder_name, is_sent_folder_name, is_trash_folder_name,
+        list_all_mailboxes, mailbox_role_for_alias, noop, normalize_append_flags,
+        resolve_mailbox_among, select_mailbox_readonly, select_mailbox_readwrite, socket_timeout,
+        uid_copy, uid_expunge, uid_move, uid_search, uid_store,
     };
     use crate::config::{AccountConfig, ServerConfig};
 
@@ -1207,6 +1251,103 @@ mod tests {
             .await
             .expect("fetching a BODY[] message should succeed");
         assert_eq!(raw, body, "returned bytes should match the BODY[] literal");
+
+        server.await.expect("test IMAP server should finish");
+    }
+
+    /// Summaries for a page of UIDs must come from a single `UID FETCH` over
+    /// the whole set, not one round trip per message.
+    #[tokio::test]
+    async fn fetch_headers_and_flags_many_uses_one_uid_fetch() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener should expose its address");
+
+        let first: &[u8] = b"Subject: First\r\n\r\n";
+        let second: &[u8] = b"Subject: Second\r\n\r\n";
+
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener
+                .accept()
+                .await
+                .expect("test server should accept a client");
+            let mut stream = BufReader::new(socket);
+
+            let login = read_imap_command(&mut stream).await;
+            reply_ok(&mut stream, &login, "LOGIN completed").await;
+
+            let fetch = read_imap_command(&mut stream).await;
+            assert!(
+                fetch.contains("UID FETCH 42,7 "),
+                "expected one UID FETCH for both uids, got {fetch:?}"
+            );
+            assert!(
+                fetch.contains("BODY.PEEK[HEADER.FIELDS"),
+                "summary fetch must use BODY.PEEK (no \\Seen side effect), got {fetch:?}"
+            );
+            let tag = fetch
+                .split_whitespace()
+                .next()
+                .expect("FETCH command should have a tag");
+
+            let socket = stream.get_mut();
+            for (seq, uid, header) in [(2, 42, first), (1, 7, second)] {
+                let line = format!(
+                    "* {seq} FETCH (UID {uid} FLAGS (\\Seen) BODY[HEADER.FIELDS (DATE FROM TO CC SUBJECT)] {{{}}}\r\n",
+                    header.len()
+                );
+                socket
+                    .write_all(line.as_bytes())
+                    .await
+                    .expect("test server should write the fetch line");
+                socket
+                    .write_all(header)
+                    .await
+                    .expect("test server should write the header literal");
+                socket
+                    .write_all(b")\r\n")
+                    .await
+                    .expect("test server should close the fetch item");
+            }
+            socket
+                .write_all(format!("{tag} OK UID FETCH completed\r\n").as_bytes())
+                .await
+                .expect("test server should complete the fetch");
+        });
+
+        let tcp = TcpStream::connect(address)
+            .await
+            .expect("test client should connect");
+        let client = Client::new(super::ImapStream::Plain(tcp));
+        let test_password = ["test", "password"].join("-");
+        let mut session = client
+            .login("user@example.com", test_password)
+            .await
+            .map_err(|(error, _)| error)
+            .expect("test client should authenticate");
+
+        let endpoints = GreenmailEndpoints {
+            host: "127.0.0.1".to_owned(),
+            smtp_port: 0,
+            imap_port: 0,
+            user: "user@example.com".to_owned(),
+            pass: "test-password".to_owned(),
+        };
+        let config = greenmail_test_config(&endpoints);
+
+        let fetched = fetch_headers_and_flags_many(&config, &mut session, &[42, 7])
+            .await
+            .expect("batched header fetch should succeed");
+        assert_eq!(
+            fetched,
+            vec![
+                (42, first.to_vec(), vec!["\\Seen".to_owned()]),
+                (7, second.to_vec(), vec!["\\Seen".to_owned()]),
+            ]
+        );
 
         server.await.expect("test IMAP server should finish");
     }
