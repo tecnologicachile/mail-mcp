@@ -42,6 +42,13 @@ impl Dirs {
             work: TempDir::new().expect("work dir"),
         }
     }
+
+    fn without_config() -> Self {
+        Self {
+            home: TempDir::new().expect("home dir"),
+            work: TempDir::new().expect("work dir"),
+        }
+    }
 }
 
 fn server(dirs: &Dirs, env: &[(&str, &str)]) -> Command {
@@ -69,6 +76,7 @@ struct Session {
     child: Child,
     stdin: Option<ChildStdin>,
     lines: Receiver<String>,
+    stderr: Receiver<String>,
 }
 
 impl Session {
@@ -85,16 +93,18 @@ impl Session {
                 }
             }
         });
-        if let Some(stderr) = child.stderr.take() {
-            std::thread::spawn(move || {
-                let mut sink = Vec::new();
-                let _ = BufReader::new(stderr).read_to_end(&mut sink);
-            });
-        }
+        let stderr = child.stderr.take().expect("stderr");
+        let (stderr_sender, stderr_text) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut text = Vec::new();
+            let _ = BufReader::new(stderr).read_to_end(&mut text);
+            let _ = stderr_sender.send(String::from_utf8_lossy(&text).into_owned());
+        });
         Self {
             child,
             stdin,
             lines,
+            stderr: stderr_text,
         }
     }
 
@@ -158,8 +168,9 @@ impl Session {
             .collect()
     }
 
-    /// Close stdin, wait for exit, and check the remaining stdout lines.
-    fn finish(mut self) {
+    /// Close stdin, wait for exit, check the remaining stdout lines, and
+    /// return what the server wrote to stderr.
+    fn finish(mut self) -> String {
         drop(self.stdin.take());
         let deadline = Instant::now() + TIMEOUT;
         while self.child.try_wait().expect("wait").is_none() {
@@ -172,6 +183,9 @@ impl Session {
         while let Ok(line) = self.lines.recv_timeout(Duration::from_secs(1)) {
             json_rpc(&line);
         }
+        self.stderr
+            .recv_timeout(Duration::from_secs(1))
+            .expect("stderr closed after exit")
     }
 }
 
@@ -192,6 +206,37 @@ fn stdio_stdout_carries_only_json_rpc_and_loads_the_default_file() {
     session.initialize();
     assert_eq!(session.account_ids(), ["fileacct"]);
     session.finish();
+}
+
+#[test]
+fn unrecognized_arguments_warn_on_stderr_and_still_start_the_server() {
+    let dirs = Dirs::with_default_config(FILE_ACCOUNT);
+    let mut cmd = server(&dirs, &[]);
+    cmd.arg("--stdio");
+    let mut session = Session::start(cmd);
+    session.initialize();
+    assert_eq!(session.account_ids(), ["fileacct"]);
+    let stderr = session.finish();
+    assert!(stderr.contains("--stdio"), "{stderr}");
+}
+
+#[test]
+fn legacy_dotenv_exports_other_variables_and_supplies_mail_settings() {
+    let dirs = Dirs::without_config();
+    fs::write(
+        dirs.work.path().join(".env"),
+        "RUST_LOG=info\n\
+         MAIL_IMAP_DOTACCT_HOST=imap.example.invalid\n\
+         MAIL_IMAP_DOTACCT_USER=dot@example.invalid\n\
+         MAIL_IMAP_DOTACCT_PASS=dot-secret\n",
+    )
+    .expect(".env file");
+    let mut session = Session::start(server(&dirs, &[]));
+    session.initialize();
+    assert_eq!(session.account_ids(), ["dotacct"]);
+    let stderr = session.finish();
+    // The startup line is logged at info, which only RUST_LOG from `.env` enables.
+    assert!(stderr.contains("starting MCP server"), "{stderr}");
 }
 
 #[test]

@@ -50,9 +50,14 @@ that implicit `.env`. Explicitly exporting variables or using Docker's
 The `.env` file is found the same way as before: in the working directory or
 the nearest parent that has one. Its first occurrence of a variable wins, a
 leading UTF-8 BOM is ignored, and reading stops at the first malformed line.
-Only recognized `MAIL_*` settings are read from it, and the process environment
-is not modified. Variables used by other components, such as `RUST_LOG` or proxy
-settings, must be exported in the process environment instead.
+Recognized `MAIL_*` settings are read from it without changing the process
+environment. Its other variables, such as `RUST_LOG` or `HTTPS_PROXY`, are
+exported to the process environment at server startup unless the process
+already sets them.
+
+Arguments the server does not recognize do not stop it: with no `config` or
+`accounts` subcommand, it starts and names the ignored options in a warning on
+stderr. A mistyped `config` or `accounts` command still fails with usage text.
 
 An empty or whitespace-only `MAIL_*` value counts as unset, in the process
 environment and in `.env`: the TOML value or the built-in default applies. A
@@ -232,6 +237,7 @@ be supplied by their corresponding process environment variable instead.
 | `search_concurrency` | integer | `4`, clamped to `1..=8` | `MAIL_IMAP_SEARCH_CONCURRENCY` |
 | `attachment_download_dir` | string | Unset; downloads use the system temp directory unless the tool supplies `output_dir` | `MAIL_ATTACHMENT_DOWNLOAD_DIR` |
 | `attachment_upload_dir` | string | Unset; any readable outbound attachment path is allowed | `MAIL_ATTACHMENT_UPLOAD_DIR` |
+| `oauth2_token_store` | string | Unset; rotated OAuth2 refresh tokens stay in memory | `MAIL_OAUTH2_TOKEN_STORE` |
 
 `MAIL_SMTP_TIMEOUT_MS` is the legacy environment name for the send timeout.
 An explicit `MAIL_SMTP_SEND_TIMEOUT_MS` wins; otherwise the legacy process
@@ -646,6 +652,10 @@ file:
 ```bash
 MAIL_OAUTH2_TOKEN_STORE=/var/lib/mail-mcp/tokens.json   # default: unset
 ```
+
+In a TOML config file the same setting is `oauth2_token_store` under
+`[settings]`. `accounts test` uses the store too, so a check reuses and saves
+rotated tokens.
 
 - The file is JSON, written via a temp file and rename, mode `0600` on Unix.
   It holds live refresh tokens: keep it out of backups you would not trust

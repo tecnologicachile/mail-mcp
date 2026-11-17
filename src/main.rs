@@ -42,22 +42,24 @@ mod pagination;
 mod server;
 mod smtp;
 
-use clap::Parser;
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 use tracing_subscriber::EnvFilter;
 
 /// Starts the MCP server, or runs a config or account command.
-#[tokio::main]
-async fn main() {
+fn main() {
     // Install the rustls CryptoProvider globally so that both tokio-rustls (IMAP)
     // and lettre (SMTP) use the same provider without conflicts.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let cli = cli::Cli::parse();
+    let cli = cli::parse();
     let result = match cli.command {
-        Some(command) => cli::execute(cli.config, command).await,
-        None => serve(cli.config).await,
+        Some(command) => block_on(cli::execute(cli.config, command)),
+        None => cli::load_runtime_file(cli.config.as_deref()).and_then(|file| {
+            // SAFETY: the async runtime is not built yet, so this is the only thread.
+            unsafe { file.export_legacy_dotenv_variables() };
+            block_on(serve(file))
+        }),
     };
     if let Err(err) = result {
         eprintln!("{err}");
@@ -65,13 +67,23 @@ async fn main() {
     }
 }
 
-async fn serve(config: Option<std::path::PathBuf>) -> Result<(), cli::CliFailure> {
+fn block_on(
+    future: impl Future<Output = Result<(), cli::CliFailure>>,
+) -> Result<(), cli::CliFailure> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| cli::CliFailure::new(format!("cannot start the async runtime: {err}")))?
+        .block_on(future)
+}
+
+async fn serve(file: config_file::ConfigFile) -> Result<(), cli::CliFailure> {
     tracing_subscriber::fmt()
         .with_env_filter(log_filter(std::env::var("RUST_LOG").ok().as_deref()))
         .with_writer(std::io::stderr)
         .init();
 
-    let runtime = cli::prepare_runtime(config)?;
+    let runtime = cli::prepare_runtime(&file)?;
     if !runtime.overrides.is_empty() {
         tracing::info!("environment overrides: {}", runtime.overrides.join(", "));
     }

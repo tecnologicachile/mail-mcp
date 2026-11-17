@@ -5,6 +5,7 @@
 //! and those commands refuse a non-terminal before reading any input.
 
 use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -126,9 +127,68 @@ pub(crate) async fn execute(config: Option<PathBuf>, command: Command) -> Result
     }
 }
 
-pub(crate) fn prepare_runtime(config: Option<PathBuf>) -> Result<Runtime, CliFailure> {
-    let file = ConfigFile::load_runtime(config.as_deref()).map_err(app_failure)?;
-    let resolved = runtime_resolved(&file)?;
+/// Parse the command line.
+///
+/// Releases without subcommands ignored every argument, so MCP client
+/// entries may still pass stray ones. When the arguments are not valid and
+/// name neither a subcommand nor help, the server starts anyway and reports
+/// the ignored arguments on stderr.
+pub(crate) fn parse() -> Cli {
+    let args: Vec<OsString> = std::env::args_os().collect();
+    match Cli::try_parse_from(&args) {
+        Ok(cli) => cli,
+        Err(err) => match server_fallback(args.get(1..).unwrap_or_default()) {
+            Some((config, ignored)) => {
+                eprintln!(
+                    "warning: ignoring {} unrecognized argument(s): {}",
+                    ignored.len(),
+                    ignored.join(" ")
+                );
+                Cli {
+                    config,
+                    command: None,
+                }
+            }
+            None => err.exit(),
+        },
+    }
+}
+
+/// The `--config` path and the arguments to ignore when rejected arguments
+/// should still start the server. `None` keeps the parse error: a subcommand
+/// or help was asked for, `--config` is unusable, or nothing is left to
+/// ignore. Ignored values are not echoed, only option names.
+fn server_fallback(args: &[OsString]) -> Option<(Option<PathBuf>, Vec<String>)> {
+    let mut config = None;
+    let mut ignored = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let arg = arg.to_str()?;
+        let path = match arg {
+            "-h" | "--help" | "-V" | "--version" | "help" | "config" | "accounts" => return None,
+            "--config" => Some(args.next()?.as_os_str()),
+            _ => arg.strip_prefix("--config=").map(OsStr::new),
+        };
+        match path {
+            Some(path) if path.is_empty() || config.is_some() => return None,
+            Some(path) => config = Some(PathBuf::from(path)),
+            None if arg.starts_with('-') => {
+                let name = arg.split_once('=').map_or(arg, |(name, _)| name);
+                ignored.push(name.to_owned());
+            }
+            None => ignored.push("<value>".to_owned()),
+        }
+    }
+    (!ignored.is_empty()).then_some((config, ignored))
+}
+
+/// Select and read the config file for server startup.
+pub(crate) fn load_runtime_file(config: Option<&Path>) -> Result<ConfigFile, CliFailure> {
+    ConfigFile::load_runtime(config).map_err(app_failure)
+}
+
+pub(crate) fn prepare_runtime(file: &ConfigFile) -> Result<Runtime, CliFailure> {
+    let resolved = runtime_resolved(file)?;
     let (transport, http) = checked_transport(&resolved.values)?;
     let server = load_server(&resolved.values, true)?;
     Ok(Runtime {
@@ -557,6 +617,44 @@ fn write_stdout(text: &str) -> Result<(), CliFailure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fallback(args: &[&str]) -> Option<(Option<PathBuf>, Vec<String>)> {
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        server_fallback(&args)
+    }
+
+    #[test]
+    fn stray_arguments_start_the_server_but_commands_and_help_do_not() {
+        assert_eq!(
+            fallback(&["--stdio", "--token=super-secret-value", "serve"]),
+            Some((
+                None,
+                vec![
+                    "--stdio".to_owned(),
+                    "--token".to_owned(),
+                    "<value>".to_owned()
+                ]
+            ))
+        );
+        assert_eq!(
+            fallback(&["--stdio", "--config", "a.toml"]),
+            Some((Some(PathBuf::from("a.toml")), vec!["--stdio".to_owned()]))
+        );
+        assert_eq!(
+            fallback(&["--config=a.toml", "-x"]),
+            Some((Some(PathBuf::from("a.toml")), vec!["-x".to_owned()]))
+        );
+        for args in [
+            &["config", "bogus"][..],
+            &["--stdio", "accounts", "list"],
+            &["--stdio", "--help"],
+            &["--stdio", "--config"],
+            &["--stdio", "--config", "a.toml", "--config", "b.toml"],
+            &["--config="],
+        ] {
+            assert_eq!(fallback(args), None, "{args:?}");
+        }
+    }
 
     #[test]
     fn scrubbed_protocol_failure_is_used_for_auth_bodies() {

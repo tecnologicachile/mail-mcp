@@ -2,8 +2,9 @@
 //!
 //! Effective runtime settings are a `MAIL_*` map. File values are overridden
 //! by the process environment. Legacy `.env` discovery runs only when no
-//! explicit or existing TOML file is selected, and it never changes the
-//! process environment.
+//! explicit or existing TOML file is selected. Its `MAIL_*` keys join the map
+//! without touching the process environment; its other variables are
+//! exported at server startup.
 
 use std::collections::BTreeMap;
 use std::env::VarError;
@@ -189,6 +190,32 @@ impl ConfigFile {
 
     fn uses_legacy_dotenv(&self, legacy_dotenv: bool) -> bool {
         legacy_dotenv && !self.explicit && !self.exists
+    }
+
+    /// Export the non-`MAIL_*` variables of the legacy `.env` to the process
+    /// environment, where logging and HTTP proxy support read them.
+    ///
+    /// Runs under the same condition as legacy `.env` discovery. A variable
+    /// already set in the process keeps its value. `MAIL_*` keys are never
+    /// exported: they reach the server through [`Self::effective`].
+    ///
+    /// # Safety
+    ///
+    /// Call before any other thread exists: the process environment must not
+    /// be written while another thread may read it.
+    pub unsafe fn export_legacy_dotenv_variables(&self) {
+        if !self.uses_legacy_dotenv(true) {
+            return;
+        }
+        let Some(bytes) = read_legacy_dotenv_bytes() else {
+            return;
+        };
+        for (key, value) in other_variables_from_dotenv_bytes(&bytes) {
+            if std::env::var_os(&key).is_none() {
+                // SAFETY: the caller guarantees no other thread is running.
+                unsafe { std::env::set_var(key, value) };
+            }
+        }
     }
 
     fn resolve_from(
@@ -679,13 +706,13 @@ fn apply_env_overrides(
 /// error or at the root. Read errors are ignored the same way `dotenv().ok()`
 /// ignored them. Nothing is written to the process environment.
 fn read_legacy_dotenv() -> Settings {
-    let Some(path) = find_legacy_dotenv() else {
-        return Settings::new();
-    };
-    let Ok(bytes) = fs::read(&path) else {
-        return Settings::new();
-    };
-    mail_settings_from_dotenv_bytes(&bytes)
+    read_legacy_dotenv_bytes()
+        .map(|bytes| mail_settings_from_dotenv_bytes(&bytes))
+        .unwrap_or_default()
+}
+
+fn read_legacy_dotenv_bytes() -> Option<Vec<u8>> {
+    fs::read(find_legacy_dotenv()?).ok()
 }
 
 /// `dir/.env` via `fs::metadata`, then parents. A regular file wins, including
@@ -719,6 +746,24 @@ fn mail_settings_from_dotenv_iter<I, E>(entries: I) -> Settings
 where
     I: IntoIterator<Item = Result<(String, String), E>>,
 {
+    let mut settings = dotenv_entries(entries);
+    settings.retain(|key, value| is_config_key(key) && !value.trim().is_empty());
+    settings
+}
+
+/// Variables of `.env` that are not `MAIL_*` settings, such as `RUST_LOG`
+/// or `HTTPS_PROXY`. Same first-occurrence and malformed-line rules.
+fn other_variables_from_dotenv_bytes(bytes: &[u8]) -> Settings {
+    let bytes = bytes.strip_prefix(UTF8_BOM).unwrap_or(bytes);
+    let mut variables = dotenv_entries(dotenvy::from_read_iter(Cursor::new(bytes)));
+    variables.retain(|key, _| !key.starts_with("MAIL_"));
+    variables
+}
+
+fn dotenv_entries<I, E>(entries: I) -> Settings
+where
+    I: IntoIterator<Item = Result<(String, String), E>>,
+{
     let mut settings = Settings::new();
     for entry in entries {
         let Ok((key, value)) = entry else {
@@ -728,7 +773,6 @@ where
             slot.insert(value);
         }
     }
-    settings.retain(|key, value| is_config_key(key) && !value.trim().is_empty());
     settings
 }
 

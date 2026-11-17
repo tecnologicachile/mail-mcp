@@ -436,8 +436,9 @@ Configuration file selection:
 - An explicitly selected missing file is a startup error. Malformed or
   unreadable files fail rather than falling back.
 - Implicit `.env` discovery runs only without an explicit TOML path or an
-  existing default file; process variables take precedence. Only recognized
-  `MAIL_*` settings are read from it; the first occurrence of a variable wins.
+  existing default file; process variables take precedence. Recognized
+  `MAIL_*` settings are read from it and its other variables are exported to
+  the process environment; the first occurrence of a variable wins.
 - With no home directory and no explicit path, runtime environment-only setup
   still works. Configuration/account management commands need a home directory
   or an explicit path.
