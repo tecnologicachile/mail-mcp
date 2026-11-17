@@ -1069,7 +1069,7 @@ impl ServerHandler for MailImapServer {
         // Identify ourselves explicitly so /mcp output and any cache
         // keyed on (server name, version) sees a fresh value when this
         // crate bumps. Without this, the framework defaults to its own
-        // name/version (rmcp 0.16.0), which never changes between our
+        // name/version (rmcp 3.10.0), which never changes between our
         // releases. rmcp 2.x deprecated the ServerInfo alias for ServerConfig and made
         // non_exhaustive, so build from Default and assign fields.
         let mut implementation = Implementation::default();
