@@ -14,7 +14,8 @@ cargo fmt -- --check
 cargo clippy --all-targets
 ```
 
-Toolchain: Rust 1.88+ (the codebase uses edition 2024 with let-chains).
+Toolchain: Rust 1.89+ (edition 2024 with let-chains, and `std::fs::File::try_lock`
+for config file saves).
 
 To exercise a change against a real server, point a `.env` at a test
 mailbox (see `.env.example` and `docs/account-setup.md`) and run the binary
