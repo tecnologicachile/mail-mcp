@@ -446,7 +446,7 @@ impl MailImapServer {
     /// size cap and keeps large binaries out of the response.
     #[tool(
         name = "imap_get_attachment",
-        description = "Download one attachment to disk",
+        description = "Download one attachment (by part_id from imap_get_message, or by filename) to disk and return its path. The bytes stay out of the response unless include_base64 is set and the file is within max_inline_bytes",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -502,7 +502,7 @@ impl MailImapServer {
     /// `APPEND`. Requires `MAIL_IMAP_WRITE_ENABLED=true`.
     #[tool(
         name = "imap_copy_message",
-        description = "Copy a message to mailbox",
+        description = "Copy a message to a mailbox, in the same account or in another one (destination_account_id)",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -531,7 +531,7 @@ impl MailImapServer {
     /// `MAIL_IMAP_WRITE_ENABLED=true`.
     #[tool(
         name = "imap_move_message",
-        description = "Move a message to mailbox",
+        description = "Move a message to a mailbox in the same account. To move across accounts, copy it with imap_copy_message and then delete the original",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -559,7 +559,7 @@ impl MailImapServer {
     /// explicit `confirm=true` and `MAIL_IMAP_WRITE_ENABLED=true`.
     #[tool(
         name = "imap_delete_message",
-        description = "Delete a message",
+        description = "Delete a message. Requires confirm=true",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -832,7 +832,7 @@ impl MailImapServer {
     /// Requires `MAIL_IMAP_WRITE_ENABLED=true` and `confirm=true`.
     #[tool(
         name = "imap_search_and_delete",
-        description = "Search messages and delete matches in one operation (up to 500)",
+        description = "Search messages and delete matches in one operation (up to 500). Requires confirm=true",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1131,7 +1131,7 @@ impl MailImapServer {
     /// Tool: Replace a draft's content
     #[tool(
         name = "draft_update",
-        description = "Replace a draft's recipients, subject, body and attachments (full replacement). Returns a new draft_id; the old one stops working. Requires MAIL_DRAFTS_ENABLED=true.",
+        description = "Replace a draft's recipients, subject, body and attachments (full replacement: attachments not passed again are dropped). Returns a new draft_id; the old one stops working. Requires MAIL_DRAFTS_ENABLED=true.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
