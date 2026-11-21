@@ -15,12 +15,25 @@
 
 Most email MCP servers only do IMAP reads. This one does **everything**: read, search, send, reply, forward, bulk operations, Microsoft Graph API, and Exchange Web Services — with real OAuth2, multi-account, and multi-provider support. Written in Rust for speed and safety.
 
-## What's New
+## What's New in v0.7.0
 
+- **`graph_send_message` now honors `MAIL_SMTP_WRITE_ENABLED`.** It was the
+  only send tool that skipped the check, so an account with a Microsoft
+  token carrying `Mail.Send` could send mail with sending turned off. If you
+  rely on that setting to keep an agent read-only or drafts-only, upgrade.
+  A test now checks that every send tool refuses when it is off.
+  ([#45](https://github.com/tecnologicachile/mail-mcp/issues/45), reported by jtron9k)
 - **Guided account configuration:** `mail-mcp config init` and `mail-mcp accounts add`
   store accounts in `~/.mail-mcp/config.toml`, outside the MCP client's JSON.
   List, edit, remove, and run read-only connection tests from the CLI.
   [Start with guided setup](docs/account-setup.md#guided-setup-with-toml).
+  Environment variables and `.env` keep working as before, and extra
+  arguments in an MCP client entry are ignored with a warning, as they were.
+  ([#40](https://github.com/tecnologicachile/mail-mcp/pull/40), by felipefdl)
+- **Dependency security update.** rmcp 3.10, quick-xml 0.42, ammonia 4.2.5,
+  rustls, lettre and others, which clears every `cargo audit` advisory that
+  has a fix. Tools, their names and their annotations are unchanged.
+  ([#42](https://github.com/tecnologicachile/mail-mcp/pull/42), by tordable)
 
 ## What's New in v0.6.2
 
