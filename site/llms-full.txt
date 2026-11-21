@@ -4,7 +4,7 @@
 
 - Website: https://mail-mcp.tecnologicachile.cl/
 - Source: https://github.com/tecnologicachile/mail-mcp
-- Latest release: v0.7.0 (https://github.com/tecnologicachile/mail-mcp/releases/latest)
+- Latest release: v0.7.1 (https://github.com/tecnologicachile/mail-mcp/releases/latest)
 - License: MIT
 - Maintainer: Tecnológica Chile (https://tecnologicachile.cl)
 - Platforms: Linux (x86_64), macOS (Intel and Apple Silicon), Windows (x86_64), Docker
