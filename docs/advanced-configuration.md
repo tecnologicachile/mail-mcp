@@ -23,7 +23,10 @@ Leading `~/` and `~\` in a configuration path expand to that home directory.
 Relative paths resolve from the process working directory. Prefer an absolute
 path in MCP-client configuration. A missing explicitly selected file is a
 startup error, not a fallback to environment-only mode. Unreadable or malformed
-TOML also fails instead of being silently ignored.
+TOML also fails instead of being silently ignored. The one exception is a
+default location the server cannot even check, such as a home directory hidden
+by systemd `ProtectHome=true`: server startup prints a warning and runs from
+the environment, as releases before the config file did.
 
 The default file applies to every `mail-mcp` process the user starts without
 `--config` or `MAIL_CONFIG_FILE`, so its accounts and write settings reach every

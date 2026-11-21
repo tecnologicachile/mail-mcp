@@ -105,7 +105,9 @@ impl ConfigFile {
     /// This matches [`Self::load`] with `allow_missing = false`, except when
     /// no `--config` is given and either `MAIL_CONFIG_FILE=none` opts out of
     /// the config file, or no config path was selected and neither `HOME` nor
-    /// `USERPROFILE` is set. Startup then uses the process environment and,
+    /// `USERPROFILE` is set, or the default file's location is not accessible
+    /// (permission denied, as with systemd `ProtectHome=true`). Startup then
+    /// uses the process environment and,
     /// when the caller asks, a legacy `.env`. No working-directory path is
     /// created.
     pub fn load_runtime(explicit: Option<&Path>) -> AppResult<Self> {
@@ -114,6 +116,19 @@ impl ConfigFile {
             let opted_out = mail_config_file.as_deref() == Some(NO_CONFIG_FILE);
             if opted_out || (mail_config_file.is_none() && home_dir().is_none()) {
                 return Ok(Self::from_environment());
+            }
+            if mail_config_file.is_none()
+                && let Some(home) = home_dir()
+            {
+                let path = home.join(".mail-mcp").join("config.toml");
+                if default_file_blocked(&path) {
+                    eprintln!(
+                        "warning: cannot check the default config file {} (permission denied); \
+                         using the environment only. Set MAIL_CONFIG_FILE=none to skip this check.",
+                        path.display()
+                    );
+                    return Ok(Self::from_environment());
+                }
             }
         }
         Self::load(explicit, false)
@@ -399,6 +414,13 @@ fn load_at(location: &ResolvedPath, allow_missing: bool) -> AppResult<ConfigFile
         original: Some(bytes),
         source: text,
     })
+}
+
+/// The default file's location cannot even be checked, as under systemd's
+/// `ProtectHome=true`. Releases before the config file never looked there, so
+/// server startup treats this like a missing default file.
+fn default_file_blocked(path: &Path) -> bool {
+    matches!(fs::metadata(path), Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied)
 }
 
 /// `Ok(None)` is a missing file. Oversized files error before their bytes are

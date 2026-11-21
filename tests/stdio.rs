@@ -239,6 +239,34 @@ fn legacy_dotenv_exports_other_variables_and_supplies_mail_settings() {
     assert!(stderr.contains("starting MCP server"), "{stderr}");
 }
 
+/// Under systemd `ProtectHome=true` the home directory cannot be read. The
+/// server must still start from the environment, as releases before the
+/// config file did.
+#[cfg(unix)]
+#[test]
+fn inaccessible_home_falls_back_to_the_environment() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dirs = Dirs::with_default_config(FILE_ACCOUNT);
+    let home = dirs.home.path();
+    fs::set_permissions(home, fs::Permissions::from_mode(0o000)).expect("lock home");
+    let blocked = fs::metadata(home.join(".mail-mcp").join("config.toml")).is_err();
+    if blocked {
+        let env = [
+            ("MAIL_IMAP_ENVACCT_HOST", "imap.example.invalid"),
+            ("MAIL_IMAP_ENVACCT_USER", "env@example.invalid"),
+            ("MAIL_IMAP_ENVACCT_PASS", "env-secret"),
+        ];
+        let mut session = Session::start(server(&dirs, &env));
+        session.initialize();
+        assert_eq!(session.account_ids(), ["envacct"]);
+        let stderr = session.finish();
+        assert!(stderr.contains("permission denied"), "{stderr}");
+    }
+    fs::set_permissions(home, fs::Permissions::from_mode(0o700)).expect("unlock home");
+    // Running as root bypasses the permission check, so there is nothing to test.
+}
+
 #[test]
 fn mail_config_file_none_ignores_the_default_file() {
     let dirs = Dirs::with_default_config(FILE_ACCOUNT);
