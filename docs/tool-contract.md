@@ -10,6 +10,7 @@ It is the source of truth for tool names, input/output shapes, validation bounds
 - Message locator: stable `message_id` format `imap:{account_id}:{mailbox}:{uidvalidity}:{uid}`.
 - Destructive/write operations: disabled by default and explicitly gated.
 - Tool annotations: every tool declares `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint`; a test fails if a tool is missing one, or if a read-only tool claims to be destructive or non-idempotent.
+- Send gate: every tool that sends mail (`smtp_send_message`, `smtp_reply_message`, `smtp_forward_message`, `graph_send_message`, `ews_send_message`, `draft_send`) refuses unless `MAIL_SMTP_WRITE_ENABLED=true`; a test checks all six.
 - Output style: concise summaries with bounded structured data.
 - Compatibility: no backward compatibility requirement with earlier implementations.
 

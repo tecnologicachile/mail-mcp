@@ -4020,6 +4020,7 @@ impl MailImapServer {
         &self,
         input: GraphSendMessageInput,
     ) -> AppResult<(String, serde_json::Value)> {
+        require_smtp_write_enabled(&self.config)?;
         validate_account_id(&input.account_id)?;
         validate_email_recipients(&input.to, "to")?;
         if !input.cc.is_empty() {

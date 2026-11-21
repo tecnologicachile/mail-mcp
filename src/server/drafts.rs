@@ -1332,6 +1332,77 @@ mod tests {
         }
     }
 
+    /// Every tool that sends mail must refuse when MAIL_SMTP_WRITE_ENABLED is
+    /// off, even for an account that has a Graph token with Mail.Send (#45).
+    #[tokio::test]
+    async fn every_send_path_requires_smtp_write_enabled() {
+        let mut config = routing_test_config();
+        config
+            .graph_oauth2_accounts
+            .insert("default".to_owned(), oauth2_config());
+        config
+            .oauth2_accounts
+            .insert("default".to_owned(), oauth2_config());
+        config
+            .ews_oauth2_accounts
+            .insert("default".to_owned(), oauth2_config());
+        let server = MailImapServer::new(config, None);
+        let message = serde_json::json!({
+            "to": ["a@example.com"],
+            "subject": "s",
+            "body_text": "b",
+            "message_id": "imap:default:INBOX:1:1",
+            "draft_id": "imap:default:Drafts:1:1",
+        });
+        let disabled = |name: &str, result: AppResult<(String, serde_json::Value)>| match result {
+            Err(AppError::InvalidInput(msg)) => {
+                assert!(msg.contains("MAIL_SMTP_WRITE_ENABLED"), "{name}: {msg}")
+            }
+            Err(other) => panic!("{name}: wrong error {other:?}"),
+            Ok(_) => panic!("{name}: sent with the send gate off"),
+        };
+
+        disabled(
+            "graph_send_message",
+            server
+                .graph_send_message_impl(serde_json::from_value(message.clone()).unwrap())
+                .await,
+        );
+        disabled(
+            "smtp_send_message",
+            server
+                .smtp_send_message_impl(serde_json::from_value(message.clone()).unwrap())
+                .await,
+        );
+        disabled(
+            "smtp_reply_message",
+            server
+                .smtp_reply_message_impl(serde_json::from_value(message.clone()).unwrap())
+                .await,
+        );
+        disabled(
+            "smtp_forward_message",
+            server
+                .smtp_forward_message_impl(serde_json::from_value(message.clone()).unwrap())
+                .await,
+        );
+        disabled(
+            "draft_send",
+            server
+                .draft_send_impl(serde_json::from_value(message.clone()).unwrap())
+                .await,
+        );
+        let ews = server
+            .ews_send_message(rmcp::handler::server::wrapper::Parameters(
+                serde_json::from_value(message.clone()).unwrap(),
+            ))
+            .await;
+        match ews {
+            Err(err) => assert!(err.message.contains("MAIL_SMTP_WRITE_ENABLED"), "{err:?}"),
+            Ok(_) => panic!("ews_send_message: sent with the send gate off"),
+        }
+    }
+
     fn oauth2_config() -> crate::oauth2::OAuth2AccountConfig {
         crate::oauth2::OAuth2AccountConfig {
             provider: crate::oauth2::OAuth2Provider::Microsoft,
