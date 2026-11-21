@@ -15,6 +15,17 @@
 
 Most email MCP servers only do IMAP reads. This one does **everything**: read, search, send, reply, forward, bulk operations, Microsoft Graph API, and Exchange Web Services — with real OAuth2, multi-account, and multi-provider support. Written in Rust for speed and safety.
 
+## What's New in v0.7.1
+
+- **Fixes v0.7.0 failing to start when the home directory is not
+  accessible.** Services hardened with systemd `ProtectHome=true` (and
+  similar sandboxes) stopped with `could not read config file
+  ~/.mail-mcp/config.toml: Permission denied`. Startup now treats an
+  inaccessible default location like a missing file, prints a warning, and
+  runs from the environment as earlier releases did. Set
+  `MAIL_CONFIG_FILE=none` to skip the check. An explicit `--config` or
+  `MAIL_CONFIG_FILE` path that cannot be read is still an error.
+
 ## What's New in v0.7.0
 
 - **`graph_send_message` now honors `MAIL_SMTP_WRITE_ENABLED`.** It was the
