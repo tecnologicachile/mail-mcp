@@ -15,6 +15,23 @@
 
 Most email MCP servers only do IMAP reads. This one does **everything**: read, search, send, reply, forward, bulk operations, Microsoft Graph API, and Exchange Web Services — with real OAuth2, multi-account, and multi-provider support. Written in Rust for speed and safety.
 
+## What's New in v0.7.2
+
+Two opt-out settings for hosts that launch `mail-mcp` as an embedded
+component with a fixed environment. Without them, behavior is unchanged.
+
+- **`MAIL_UPDATE_CHECK=false` skips the startup release check.** By default
+  the server asks the GitHub releases API for the latest version (waiting at
+  most 2 seconds) and adds an update notice to its instructions. Hosts that
+  pin the version can now turn that request off.
+- **`MAIL_DOTENV=false` turns off legacy `.env` discovery.** The `.env` file
+  is searched in the working directory and every parent. With this set in the
+  process environment, no `.env` is read and none of its variables are
+  exported, so a stray file cannot add accounts or settings.
+
+Both accept `false`, `0` or `off`; a value that is not a boolean is a startup
+error.
+
 ## What's New in v0.7.1
 
 - **Fixes v0.7.0 failing to start when the home directory is not
@@ -910,6 +927,8 @@ see the [TOML configuration reference](docs/advanced-configuration.md#toml-confi
 | `MAIL_MCP_HTTP_HOST` | 127.0.0.1 | HTTP bind address (IP literal) |
 | `MAIL_MCP_HTTP_PORT` | 8000 | HTTP bind port |
 | `MAIL_MCP_HTTP_PATH` | /mcp | HTTP endpoint path |
+| `MAIL_DOTENV` | true | Look for a legacy `.env` in the working directory or its parents when no TOML file applies. `false` turns that off: nothing is read or exported from any `.env`. Process environment only |
+| `MAIL_UPDATE_CHECK` | true | At startup, ask GitHub for the latest release (2 s limit) and add a notice to the server instructions when a newer one exists. `false` skips the request, for hosts that pin the version. Environment or `.env` only |
 
 </details>
 
