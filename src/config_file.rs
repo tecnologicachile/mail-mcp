@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, Item, TableLike, Value};
 
+use crate::config::parse_bool_value;
 use crate::errors::{AppError, AppResult};
 
 /// Effective configuration values keyed by `MAIL_*` setting name.
@@ -94,6 +95,7 @@ impl ConfigFile {
     /// returns an error. Server startup should use [`Self::load_runtime`],
     /// which keeps running from the environment instead of inventing a path.
     pub fn load(explicit: Option<&Path>, allow_missing: bool) -> AppResult<Self> {
+        dotenv_enabled_from_env()?;
         let mail_config_file = mail_config_file_from_env()?;
         let home = home_dir();
         let location = resolve_config_path(explicit, mail_config_file.as_deref(), home.as_deref())?;
@@ -111,6 +113,7 @@ impl ConfigFile {
     /// when the caller asks, a legacy `.env`. No working-directory path is
     /// created.
     pub fn load_runtime(explicit: Option<&Path>) -> AppResult<Self> {
+        dotenv_enabled_from_env()?;
         if explicit.is_none() {
             let mail_config_file = mail_config_file_from_env()?;
             let opted_out = mail_config_file.as_deref() == Some(NO_CONFIG_FILE);
@@ -139,7 +142,8 @@ impl ConfigFile {
     /// When `legacy_dotenv` is set and this file is neither explicit nor
     /// existing, recognized `MAIL_*` keys are also read from `.env` through
     /// an iterator. Process environment keys override both sources. `.env` is
-    /// never applied for an explicit path or an existing TOML file.
+    /// never applied for an explicit path or an existing TOML file, nor when
+    /// the process sets `MAIL_DOTENV=false`.
     pub fn effective(&self, legacy_dotenv: bool) -> AppResult<ResolvedConfig> {
         let dotenv = if self.uses_legacy_dotenv(legacy_dotenv) {
             read_legacy_dotenv()
@@ -204,7 +208,12 @@ impl ConfigFile {
     }
 
     fn uses_legacy_dotenv(&self, legacy_dotenv: bool) -> bool {
-        legacy_dotenv && !self.explicit && !self.exists
+        // An invalid MAIL_DOTENV fails `load` and `load_runtime`; if one is
+        // seen here anyway, `.env` stays off.
+        legacy_dotenv
+            && !self.explicit
+            && !self.exists
+            && dotenv_enabled_from_env().unwrap_or(false)
     }
 
     /// Export the non-`MAIL_*` variables of the legacy `.env` to the process
@@ -979,6 +988,22 @@ fn schema_err(source: &str, path: &str, label: &str) -> AppError {
     }
 }
 
+/// `MAIL_DOTENV` from the process environment (default `true`). `false`
+/// turns off legacy `.env` discovery: no `MAIL_*` settings are read from it
+/// and no other variables are exported. Only the process environment can set
+/// it; a `.env` cannot switch itself off.
+fn dotenv_enabled_from_env() -> AppResult<bool> {
+    match std::env::var("MAIL_DOTENV") {
+        Ok(value) if value.trim().is_empty() => Ok(true),
+        Ok(value) => parse_bool_value(&value)
+            .ok_or_else(|| AppError::invalid("invalid boolean setting MAIL_DOTENV")),
+        Err(VarError::NotPresent) => Ok(true),
+        Err(VarError::NotUnicode(_)) => Err(AppError::invalid(
+            "environment variable MAIL_DOTENV contains non-unicode data",
+        )),
+    }
+}
+
 fn mail_config_file_from_env() -> AppResult<Option<String>> {
     match std::env::var("MAIL_CONFIG_FILE") {
         Ok(value) => {
@@ -1097,6 +1122,7 @@ const GLOBAL_KEYS: &[&str] = &[
     "MAIL_MCP_HTTP_HOST",
     "MAIL_MCP_HTTP_PORT",
     "MAIL_MCP_HTTP_PATH",
+    "MAIL_UPDATE_CHECK",
 ];
 
 const IMAP_ENV_SUFFIXES: &[&str] = &["HOST", "PORT", "SECURE", "USER", "PASS"];

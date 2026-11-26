@@ -474,6 +474,11 @@ Transport (see `docs/advanced-configuration.md#remote-http-transport`):
 - `MAIL_MCP_HTTP_PORT` (default `8000`)
 - `MAIL_MCP_HTTP_PATH` (default `/mcp`)
 
+Startup:
+
+- `MAIL_DOTENV` (default `true`): `false` (or `0`, `off`) turns off legacy `.env` discovery in the working directory and its parents; nothing is read or exported from it. Process environment only.
+- `MAIL_UPDATE_CHECK` (default `true`): at startup the server asks the GitHub releases API for the latest release, waiting at most 2 seconds, and appends an update notice to the server instructions when a newer one exists. `false` (or `0`, `off`) skips the request entirely. Environment or `.env` only, not a TOML field.
+
 ## Implementation Notes for Next Artifact
 
 Next artifact will generate Rust types and schema definitions from this contract, then register all tools in an `rmcp` stdio server skeleton with unified error handling.

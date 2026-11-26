@@ -88,7 +88,12 @@ async fn serve(file: config_file::ConfigFile) -> Result<(), cli::CliFailure> {
         tracing::info!("environment overrides: {}", runtime.overrides.join(", "));
     }
     tracing::info!("starting MCP server transport={:?}", runtime.transport);
-    let update_notice = check_for_updates().await;
+    let update_notice = if runtime.update_check {
+        check_for_updates().await
+    } else {
+        tracing::debug!("update check: off (MAIL_UPDATE_CHECK=false)");
+        None
+    };
     let server = server::MailImapServer::new(runtime.config, update_notice);
     match runtime.http {
         Some(settings) => http::serve(server, settings)
@@ -109,7 +114,8 @@ async fn serve(file: config_file::ConfigFile) -> Result<(), cli::CliFailure> {
 }
 
 /// Check GitHub for newer releases. Returns a notice string if an update is available.
-/// Times out after 2 seconds to avoid blocking startup.
+/// Times out after 2 seconds to avoid blocking startup. `MAIL_UPDATE_CHECK=false`
+/// skips the call.
 async fn check_for_updates() -> Option<String> {
     let current = env!("CARGO_PKG_VERSION");
     let url = "https://api.github.com/repos/tecnologicachile/mail-mcp/releases/latest";

@@ -239,6 +239,78 @@ fn legacy_dotenv_exports_other_variables_and_supplies_mail_settings() {
     assert!(stderr.contains("starting MCP server"), "{stderr}");
 }
 
+/// A `.env` in a parent of the working directory is still found, and
+/// `MAIL_DOTENV=false` turns that discovery off entirely.
+#[test]
+fn mail_dotenv_false_ignores_a_parent_dotenv() {
+    let start = |dotenv: Option<&str>| {
+        let dirs = Dirs::without_config();
+        fs::write(
+            dirs.work.path().join(".env"),
+            "RUST_LOG=info\n\
+             MAIL_IMAP_WRITE_ENABLED=true\n\
+             MAIL_IMAP_DOTACCT_HOST=imap.example.invalid\n\
+             MAIL_IMAP_DOTACCT_USER=dot@example.invalid\n\
+             MAIL_IMAP_DOTACCT_PASS=dot-secret\n",
+        )
+        .expect(".env file");
+        let nested = dirs.work.path().join("nested");
+        fs::create_dir(&nested).expect("nested dir");
+        let mut env = vec![
+            ("MAIL_CONFIG_FILE", "none"),
+            ("MAIL_IMAP_ENVACCT_HOST", "imap.example.invalid"),
+            ("MAIL_IMAP_ENVACCT_USER", "env@example.invalid"),
+            ("MAIL_IMAP_ENVACCT_PASS", "env-secret"),
+        ];
+        if let Some(value) = dotenv {
+            env.push(("MAIL_DOTENV", value));
+        }
+        let mut cmd = server(&dirs, &env);
+        cmd.current_dir(&nested);
+        let mut session = Session::start(cmd);
+        session.initialize();
+        let ids = session.account_ids();
+        (ids, session.finish())
+    };
+
+    let (ids, stderr) = start(None);
+    assert_eq!(
+        ids,
+        ["dotacct", "envacct"],
+        "control: the parent .env is read"
+    );
+    assert!(stderr.contains("starting MCP server"), "{stderr}");
+
+    for value in ["false", "0", "off"] {
+        let (ids, stderr) = start(Some(value));
+        assert_eq!(ids, ["envacct"], "MAIL_DOTENV={value} still read .env");
+        // RUST_LOG=info comes only from .env, so no info line means it was not exported.
+        assert!(!stderr.contains("starting MCP server"), "{stderr}");
+    }
+}
+
+#[test]
+fn invalid_mail_dotenv_is_rejected_at_startup() {
+    let dirs = Dirs::without_config();
+    let output = server(
+        &dirs,
+        &[
+            ("MAIL_CONFIG_FILE", "none"),
+            ("MAIL_DOTENV", "maybe"),
+            ("MAIL_IMAP_ENVACCT_HOST", "imap.example.invalid"),
+            ("MAIL_IMAP_ENVACCT_USER", "env@example.invalid"),
+            ("MAIL_IMAP_ENVACCT_PASS", "env-secret"),
+        ],
+    )
+    .stdin(Stdio::null())
+    .output()
+    .expect("run mail-mcp");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "startup should fail");
+    assert!(output.stdout.is_empty(), "stdout must stay empty");
+    assert!(stderr.contains("MAIL_DOTENV"), "{stderr}");
+}
+
 /// Under systemd `ProtectHome=true` the home directory cannot be read. The
 /// server must still start from the environment, as releases before the
 /// config file did.
@@ -280,6 +352,70 @@ fn mail_config_file_none_ignores_the_default_file() {
     session.initialize();
     assert_eq!(session.account_ids(), ["envacct"]);
     session.finish();
+}
+
+/// Start a server with every HTTPS request sent to a local proxy that never
+/// answers, and report whether the server opened a connection to it.
+fn startup_contacts_the_network(env: &[(&str, &str)]) -> bool {
+    let proxy = std::net::TcpListener::bind("127.0.0.1:0").expect("proxy listener");
+    let proxy_url = format!("http://{}", proxy.local_addr().expect("proxy address"));
+    let dirs = Dirs::without_config();
+    let mut account = vec![
+        ("MAIL_CONFIG_FILE", "none"),
+        ("MAIL_IMAP_ENVACCT_HOST", "imap.example.invalid"),
+        ("MAIL_IMAP_ENVACCT_USER", "env@example.invalid"),
+        ("MAIL_IMAP_ENVACCT_PASS", "env-secret"),
+    ];
+    account.extend_from_slice(env);
+    let mut cmd = server(&dirs, &account);
+    for key in ["NO_PROXY", "no_proxy", "HTTP_PROXY", "http_proxy"] {
+        cmd.env_remove(key);
+    }
+    for key in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+        cmd.env(key, &proxy_url);
+    }
+    let mut session = Session::start(cmd);
+    session.initialize();
+    assert_eq!(session.account_ids(), ["envacct"]);
+    session.finish();
+    proxy.set_nonblocking(true).expect("nonblocking proxy");
+    proxy.accept().is_ok()
+}
+
+#[test]
+fn mail_update_check_false_keeps_startup_off_the_network() {
+    assert!(
+        startup_contacts_the_network(&[]),
+        "control: the default startup should ask GitHub for the latest release"
+    );
+    for value in ["false", "0", "off"] {
+        assert!(
+            !startup_contacts_the_network(&[("MAIL_UPDATE_CHECK", value)]),
+            "MAIL_UPDATE_CHECK={value} still contacted the network"
+        );
+    }
+}
+
+#[test]
+fn invalid_mail_update_check_is_rejected_at_startup() {
+    let dirs = Dirs::without_config();
+    let output = server(
+        &dirs,
+        &[
+            ("MAIL_CONFIG_FILE", "none"),
+            ("MAIL_UPDATE_CHECK", "sometimes"),
+            ("MAIL_IMAP_ENVACCT_HOST", "imap.example.invalid"),
+            ("MAIL_IMAP_ENVACCT_USER", "env@example.invalid"),
+            ("MAIL_IMAP_ENVACCT_PASS", "env-secret"),
+        ],
+    )
+    .stdin(Stdio::null())
+    .output()
+    .expect("run mail-mcp");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "startup should fail");
+    assert!(output.stdout.is_empty(), "stdout must stay empty");
+    assert!(stderr.contains("MAIL_UPDATE_CHECK"), "{stderr}");
 }
 
 #[test]

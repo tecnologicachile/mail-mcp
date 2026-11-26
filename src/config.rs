@@ -637,6 +637,16 @@ fn required_setting(settings: &Settings, key: &str) -> AppResult<String> {
 ///
 /// Returns `InvalidInput` if the setting is present but unrecognized. The
 /// value is omitted so a misplaced secret is not echoed.
+/// Whether startup may ask GitHub for a newer release (`MAIL_UPDATE_CHECK`,
+/// default `true`). Hosts that pin the version set it to `false`.
+///
+/// # Errors
+///
+/// Returns `InvalidInput` when the value is not a boolean.
+pub(crate) fn update_check_enabled(settings: &Settings) -> AppResult<bool> {
+    parse_bool_setting(settings, "MAIL_UPDATE_CHECK", true)
+}
+
 fn parse_bool_setting(settings: &Settings, key: &str, default: bool) -> AppResult<bool> {
     match setting(settings, key) {
         Some(v) => parse_bool_value(v)
@@ -670,7 +680,7 @@ fn parse_upload_dir(value: Option<&str>) -> AppResult<Option<PathBuf>> {
     Ok(Some(dir))
 }
 
-fn parse_bool_value(value: &str) -> Option<bool> {
+pub(crate) fn parse_bool_value(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "y" | "on" => Some(true),
         "0" | "false" | "no" | "n" | "off" => Some(false),

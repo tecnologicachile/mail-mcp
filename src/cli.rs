@@ -18,7 +18,7 @@ use crate::cli_accounts::{
     remove_account, render_accounts, require_terminal, with_unchanged,
 };
 pub(crate) use crate::cli_accounts::{CliFailure, public_text};
-use crate::config::{AuthMethod, ServerConfig};
+use crate::config::{AuthMethod, ServerConfig, update_check_enabled};
 use crate::config_file::{ConfigFile, ResolvedConfig, Settings, is_config_key, valid_account_id};
 use crate::errors::{AppError, AppResult};
 use crate::http::{HttpSettings, Transport};
@@ -108,6 +108,7 @@ pub(crate) struct Runtime {
     pub config: ServerConfig,
     pub transport: Transport,
     pub http: Option<HttpSettings>,
+    pub update_check: bool,
     pub overrides: Vec<String>,
 }
 
@@ -190,11 +191,13 @@ pub(crate) fn load_runtime_file(config: Option<&Path>) -> Result<ConfigFile, Cli
 pub(crate) fn prepare_runtime(file: &ConfigFile) -> Result<Runtime, CliFailure> {
     let resolved = runtime_resolved(file)?;
     let (transport, http) = checked_transport(&resolved.values)?;
+    let update_check = checked_update_check(&resolved.values)?;
     let server = load_server(&resolved.values, true)?;
     Ok(Runtime {
         config: server,
         transport,
         http,
+        update_check,
         overrides: sorted_names(&resolved.overrides),
     })
 }
@@ -222,6 +225,10 @@ fn validate_config(config: Option<PathBuf>) -> Result<(), CliFailure> {
         Ok(checked) => checked,
         Err(err) => return Err(fail_with_overrides(&resolved, err)),
     };
+    let update_check = match checked_update_check(&resolved.values) {
+        Ok(enabled) => enabled,
+        Err(err) => return Err(fail_with_overrides(&resolved, err)),
+    };
     if let Err(err) = load_server(&resolved.values, true) {
         return Err(fail_with_overrides(&resolved, err));
     }
@@ -233,6 +240,9 @@ fn validate_config(config: Option<PathBuf>) -> Result<(), CliFailure> {
                 println!("transport: http {}{}", settings.addr, settings.path);
             }
         }
+    }
+    if !update_check {
+        println!("update check: off");
     }
     println!("ok");
     print_override_report(&resolved.overrides);
@@ -472,6 +482,10 @@ fn checked_transport(values: &Settings) -> Result<(Transport, Option<HttpSetting
         None
     };
     Ok((transport, http))
+}
+
+fn checked_update_check(values: &Settings) -> Result<bool, CliFailure> {
+    update_check_enabled(values).map_err(|err| CliFailure::new(public_text(&err.to_string())))
 }
 
 fn load_server(values: &Settings, hint_if_empty: bool) -> Result<ServerConfig, CliFailure> {

@@ -267,6 +267,14 @@ The repository publishes GitHub Release archives/installers via cargo-dist.
   tokens are persisted (unset = in-memory rotation only). Entries carry a
   fingerprint of the env token they came from, so a changed env token wins.
   Read and write failures are logged, never fatal.
+- `MAIL_DOTENV`: legacy `.env` discovery (default `true`; searched in the
+  working directory and its parents). `false` turns it off: no `MAIL_*` keys are
+  read and no other variables are exported. Process environment only (a `.env`
+  cannot disable itself); an invalid value fails `load` and `load_runtime`.
+- `MAIL_UPDATE_CHECK`: startup GitHub release check (default `true`, 2 s
+  timeout, adds an update notice to the server instructions). `false` skips
+  the request; hosts that pin the version (embedded launches) set it.
+  Environment or `.env` only, like the transport keys; not a TOML field.
 - `MAIL_IMAP_SEARCH_CONCURRENCY`: parallel IMAP connections used by
   `imap_search_all_mailboxes` (default `4`, clamped to `1..=8`). Each connection
   walks its share of the mailboxes with EXAMINE + UID SEARCH; providers cap

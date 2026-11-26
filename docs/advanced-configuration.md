@@ -58,6 +58,13 @@ environment. Its other variables, such as `RUST_LOG` or `HTTPS_PROXY`, are
 exported to the process environment at server startup unless the process
 already sets them.
 
+`MAIL_DOTENV=false` (or `0`, `off`) in the process environment turns `.env`
+discovery off: no file is searched for, no `MAIL_*` setting is read from it, and
+nothing is exported. Use it when a host launches `mail-mcp` with a fixed
+environment and a stray `.env` in a parent directory must not add accounts or
+settings. A value that is not a boolean is a startup error. Only the process can
+set it; a `.env` cannot turn itself off.
+
 Arguments the server does not recognize do not stop it: with no `config` or
 `accounts` subcommand, it starts and names the ignored options in a warning on
 stderr. A mistyped `config` or `accounts` command still fails with usage text.
@@ -168,6 +175,10 @@ Transport settings (`MAIL_MCP_TRANSPORT` and `MAIL_MCP_HTTP_*`) are not TOML
 fields: they are read only from the process environment or `.env`, so a shared
 file cannot move stdio clients to HTTP. See
 [remote HTTP transport](#remote-http-transport) before exposing a listener.
+`MAIL_UPDATE_CHECK` is also environment-only. At startup the server asks the
+GitHub releases API for the latest release (at most 2 seconds) and adds a
+notice to its instructions when a newer one exists; `MAIL_UPDATE_CHECK=false`
+skips that request, for hosts that ship a pinned version.
 
 ### OAuth2, Graph, and EWS Examples
 
